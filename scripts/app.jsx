@@ -1525,7 +1525,12 @@ function App() {
 
   useEffect(() => {
     if (!userProfile) return;
+    const params = new URLSearchParams(window.location.search);
+    const pageFromUrl = params.get('page');
+    const crasIdFromUrl = params.get('cras_id');
     if (page === 'PainelTV') {
+      if (pageFromUrl === 'PainelTV') return;
+      if (crasIdFromUrl) return;
       const role = userProfile.role;
       let start = 'PainelTV';
       if (role === 'superintendente') start = 'Administracao';
