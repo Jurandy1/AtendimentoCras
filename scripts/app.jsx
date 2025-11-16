@@ -748,47 +748,50 @@ const PainelTV = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList })
   useEffect(() => {
     if (!db || !selectedCrasId) return;
 
-    // Chamando
-    const qChamando = query(collection(db, collectionPath), where("cras_id", "==", selectedCrasId), where("status", "==", "chamando"), limit(1));
-    const unsubscribeChamando = onSnapshot(qChamando, (snapshot) => {
-      if (snapshot.empty) {
-        setChamando(null);
-      } else {
-        const docData = snapshot.docs[0].data();
-        const tipo = tiposAtendimento.find(t => t.id === docData.tipo_atendimento_id);
-        const atendente = atendentesList.find(a => a.id === docData.atendente_id);
+    const qCras = query(collection(db, collectionPath), where("cras_id", "==", selectedCrasId));
+    const unsubscribe = onSnapshot(qCras, (snapshot) => {
+      const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const startOfToday = new Date(); startOfToday.setHours(0,0,0,0);
+      const docsHoje = docs.filter(d => {
+        const hc = d.hora_chegada;
+        if (!hc || !hc.toDate) return true;
+        const dt = hc.toDate();
+        return dt >= startOfToday;
+      });
+      const chamandoDoc = docsHoje
+        .filter(d => d.hora_chamada)
+        .sort((a,b) => (b.hora_chamada?.toMillis?.() || 0) - (a.hora_chamada?.toMillis?.() || 0))[0] || null;
+      if (chamandoDoc) {
+        const tipo = tiposAtendimento.find(t => t.id === chamandoDoc.tipo_atendimento_id);
+        const atendente = atendentesList.find(a => a.id === chamandoDoc.atendente_id);
         setChamando({
-          ...docData,
+          ...chamandoDoc,
           tipo_nome: tipo?.nome || 'Atendimento',
           tipo_cor: tipo?.cor || '#333',
           atendente_nome: atendente?.nome || 'Atendente',
           atendente_guiche: atendente?.guiche || '?'
         });
         setHighlightKey(k => k + 1);
+      } else {
+        setChamando(null);
       }
-    }, (err) => { setError("Erro ao buscar chamada principal."); console.error(err); });
 
-    // Últimos Chamados (Em Atendimento)
-    const qUltimos = query(collection(db, collectionPath), where("cras_id", "==", selectedCrasId), where("status", "==", "em_atendimento"));
-    const unsubscribeUltimos = onSnapshot(qUltimos, (snapshot) => {
-      const chamadosList = snapshot.docs.map(doc => {
-        const docData = doc.data();
-        const tipo = tiposAtendimento.find(t => t.id === docData.tipo_atendimento_id);
-        const atendente = atendentesList.find(a => a.id === docData.atendente_id);
-        return {
-          ...docData,
-          tipo_nome: tipo?.nome || 'Atendimento',
-          atendente_guiche: atendente?.guiche || '?'
-        };
-      }).sort((a,b) => {
-        const ta = a.hora_chamada?.toMillis?.() || 0;
-        const tb = b.hora_chamada?.toMillis?.() || 0;
-        return tb - ta;
-      }).slice(0,4);
-      setUltimosChamados(chamadosList);
-    }, (err) => { setError("Erro ao buscar últimos chamados."); console.error(err); });
+      let lista = docsHoje.filter(d => d.status === 'em_atendimento').sort((a,b) => (b.hora_chamada?.toMillis?.() || 0) - (a.hora_chamada?.toMillis?.() || 0));
+      if (lista.length === 0) {
+        lista = docsHoje.filter(d => d.status === 'chamando').sort((a,b) => (b.hora_chamada?.toMillis?.() || 0) - (a.hora_chamada?.toMillis?.() || 0));
+      }
+      if (lista.length === 0) {
+        lista = docsHoje.filter(d => d.status === 'aguardando').sort((a,b) => (a.hora_chegada?.toMillis?.() || 0) - (b.hora_chegada?.toMillis?.() || 0));
+      }
+      const emAtendimento = lista.slice(0,4).map(it => {
+        const tipo = tiposAtendimento.find(t => t.id === it.tipo_atendimento_id);
+        const atendente = atendentesList.find(a => a.id === it.atendente_id);
+        return { ...it, tipo_nome: tipo?.nome || 'Atendimento', atendente_guiche: atendente?.guiche || '?' };
+      });
+      setUltimosChamados(emAtendimento);
+    }, (err) => { setError("Erro ao atualizar painel."); console.error(err); });
 
-    return () => { unsubscribeChamando(); unsubscribeUltimos(); };
+    return () => unsubscribe();
   }, [db, selectedCrasId, appId, collectionPath, tiposAtendimento, atendentesList]);
 
   useEffect(() => {
