@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function auth() { return request.auth != null; }
+    function userDoc(appId) { return get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)); }
+    function hasUser(appId) { return auth() && userDoc(appId).data != null; }
+    function role(appId) { return hasUser(appId) ? userDoc(appId).data.role : null; }
+    function userCras(appId) { return hasUser(appId) ? userDoc(appId).data.cras_id : null; }
+    function isSuper(appId) { return role(appId) == 'superintendente'; }
+    function isCoord(appId) { return role(appId) in ['coordenadora','coordenador']; }
+    function isAtend(appId) { return role(appId) == 'atendente'; }
+    function isRecep(appId) { return role(appId) == 'recepcionista'; }
+    function changedOnly(allowed) { return request.resource.data.diff(resource.data).changedKeys().hasOnly(allowed); }
+    function sameCras(appId) { return resource.data.cras_id == userCras(appId); }
+    function validateAtendenteCras(appId) {
+      return request.resource.data.atendente_id == null
+        || get(/databases/$(database)/documents/artifacts/$(appId)/public/data/atendentes/$(request.resource.data.atendente_id)).data.cras_id == userCras(appId);
+    }
+
+    match /artifacts/{appId}/public/data/atendimentos/{docId} {
+      allow read: if true;
+      allow create: if auth() && isRecep(appId) && request.resource.data.cras_id == userCras(appId) && request.resource.data.status == 'aguardando';
+      // Superintendente pode atualizar qualquer campo; demais perfis têm restrições fortes
+      allow update: if auth() && (
+        isSuper(appId) || (
+          ((isAtend(appId) && sameCras(appId)) || (isCoord(appId) && sameCras(appId)))
+          && changedOnly(['status','hora_chamada','hora_inicio','hora_fim','observacoes','atendente_id'])
+          && request.resource.data.cras_id == resource.data.cras_id
+          && request.resource.data.tipo_atendimento_id == resource.data.tipo_atendimento_id
+          && request.resource.data.cidadao == resource.data.cidadao
+          && validateAtendenteCras(appId)
+        )
+      );
+      allow delete: if auth() && isSuper(appId);
+    }
+
+    match /artifacts/{appId}/public/data/atendentes/{docId} {
+      allow read: if auth();
+      allow create, update, delete: if auth() && (
+        isSuper(appId) || ( isCoord(appId) && request.resource.data.cras_id == userCras(appId) )
+      );
+    }
+
+    match /artifacts/{appId}/public/data/tipos_atendimento/{docId} {
+      allow read: if true;
+      allow create, update, delete: if auth() && isSuper(appId);
+    }
+
+    match /artifacts/{appId}/public/data/cras_unidades/{docId} {
+      allow read: if true;
+      allow create, update, delete: if auth() && isSuper(appId);
+    }
+
+    match /artifacts/{appId}/public/data/users_by_email/{email} {
+      allow read: if auth() && (isSuper(appId) || isCoord(appId));
+      allow create, update, delete: if auth() && (
+        isSuper(appId) || (isCoord(appId) && request.resource.data.cras_id == userCras(appId) && request.resource.data.role in ['recepcionista','atendente'])
+      );
+    }
+
+    match /artifacts/{appId}/public/data/users/{uid} {
+      allow read: if auth() && (uid == request.auth.uid || isSuper(appId) || isCoord(appId));
+      allow create, update, delete: if auth() && isSuper(appId);
+    }
+  }
+}

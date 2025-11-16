@@ -714,6 +714,7 @@ const PainelTV = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList })
   const [ultimosChamados, setUltimosChamados] = useState([]);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [error, setError] = useState(null);
+  const [highlightKey, setHighlightKey] = useState(0);
   const collectionPath = `artifacts/${appId}/public/data/atendimentos`;
 
   useEffect(() => {
@@ -748,6 +749,7 @@ const PainelTV = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList })
           atendente_nome: atendente?.nome || 'Atendente',
           atendente_guiche: atendente?.guiche || '?'
         });
+        setHighlightKey(k => k + 1);
       }
     }, (err) => { setError("Erro ao buscar chamada principal."); console.error(err); });
 
@@ -763,12 +765,23 @@ const PainelTV = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList })
           tipo_nome: tipo?.nome || 'Atendimento',
           atendente_guiche: atendente?.guiche || '?'
         };
-      });
+      }).sort((a,b) => {
+        const ta = a.hora_chamada?.toMillis?.() || 0;
+        const tb = b.hora_chamada?.toMillis?.() || 0;
+        return tb - ta;
+      }).slice(0,4);
       setUltimosChamados(chamadosList);
     }, (err) => { setError("Erro ao buscar últimos chamados."); console.error(err); });
 
     return () => { unsubscribeChamando(); unsubscribeUltimos(); };
   }, [db, selectedCrasId, appId, collectionPath, tiposAtendimento, atendentesList]);
+
+  useEffect(() => {
+    if (chamando) {
+      const audio = document.getElementById('somChamada');
+      if (audio) { try { audio.play(); } catch (_) {} }
+    }
+  }, [chamando]);
 
   if (!selectedCrasId) {
     return (
@@ -790,55 +803,52 @@ const PainelTV = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList })
 
   const crasAtual = crasUnidades.find(c => c.id === selectedCrasId);
   return (
-    <div className="flex h-screen w-screen bg-gray-900 text-white font-sans overflow-hidden">
-      <div className="w-2/3 h-full flex flex-col p-8" style={{ backgroundColor: '#050A1C' }}>
-        <header className="flex justify-between items-center mb-6">
-          <img src={LOGO_URL} alt="Logo SEMCAS" className="h-16" />
-          <div className="text-right">
-            <h1 className="text-4xl font-bold">{crasAtual?.nome || 'Painel CRAS'}</h1>
-            <h2 className="text-5xl font-light tracking-wider">{currentTime.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long' })}</h2>
+    <div className="flex flex-col h-screen w-screen bg-gray-100 text-gray-800">
+      <header className="h-16 w-full px-6" style={{ backgroundColor: COR_PRINCIPAL }}>
+        <div className="h-full grid" style={{ gridTemplateColumns: '1fr auto 1fr' }}>
+          <div></div>
+          <div className="self-center text-white font-bold text-center" style={{ fontSize: '42px' }}>CRAS — {crasAtual?.nome || 'Nome da Unidade'}</div>
+          <div className="self-center justify-self-end text-white font-semibold" style={{ fontSize: '34px' }}>{currentTime.toLocaleTimeString('pt-BR', { hour12: false })}</div>
+        </div>
+      </header>
+      <style>{`@keyframes flashZoom { 0% { transform: scale(1); opacity: 0.2; } 20% { transform: scale(1.18); opacity: 1; } 50% { transform: scale(1.08); } 100% { transform: scale(1); } } .highlight { animation: flashZoom 900ms ease-in-out; }`}</style>
+      <div className="flex-1 flex p-6 gap-6">
+        <div className="basis-[65%] bg-white rounded-lg shadow p-8">
+          <div className="text-lg font-semibold text-gray-700 mb-4" style={{ fontSize: '28px' }}>Chamando Agora</div>
+          <div className="text-gray-600 mb-2" style={{ fontSize: '26px' }}>USUÁRIO CHAMADO</div>
+          <div key={highlightKey} className={`${chamando ? 'text-blue-700 highlight' : 'text-gray-400'}`} style={{ fontSize: '60px', fontWeight: 800 }}>{chamando ? chamando.cidadao.nome : 'AGUARDANDO...'}</div>
+          <div className="mt-8">
+            <div className="text-sm text-gray-600 mb-1">ATENDENTE</div>
+            <div className="font-semibold text-blue-700" style={{ fontSize: '52px' }}>{chamando ? (chamando.atendente_nome || '---') : '---'}</div>
           </div>
-        </header>
-        <main className="flex-1 flex items-center justify-center rounded-lg" style={{ backgroundColor: 'rgba(255, 255, 255, 0.05)' }}>
-          {chamando ? (
-            <div className="w-full h-full flex flex-col justify-between p-10 rounded-lg" style={{ backgroundColor: chamando.tipo_cor || COR_PRINCIPAL }}>
-              <div className="text-center">
-                <h3 className="text-5xl font-semibold uppercase tracking-widest text-white text-opacity-90">Chamando para Atendimento</h3>
-                <hr className="border-t-2 border-white border-opacity-50 my-4" />
-              </div>
-              <div className="text-center my-8">
-                <span className="text-4xl font-medium text-white text-opacity-80">Cidadão(ã)</span>
-                <h4 className="text-9xl font-bold uppercase truncate" style={{ lineHeight: '1.1' }}>{chamando.cidadao.nome}</h4>
-                <span className="text-5xl font-light text-white text-opacity-80">{maskCPF(chamando.cidadao.cpf)}</span>
-              </div>
-              <div className="flex justify-between items-end text-center">
-                <div><span className="text-3xl font-medium text-white text-opacity-80 block">Tipo</span><span className="text-4xl font-semibold uppercase">{chamando.tipo_nome}</span></div>
-                <div><span className="text-3xl font-medium text-white text-opacity-80 block">Atendente</span><span className="text-4xl font-semibold uppercase">{chamando.atendente_nome}</span></div>
-                <div><span className="text-3xl font-medium text-white text-opacity-80 block">Dirija-se ao</span><span className="text-8xl font-bold bg-white text-black px-6 py-2 rounded-lg">{`GUICHÊ ${chamando.atendente_guiche}`}</span></div>
-              </div>
-            </div>
-          ) : (
-            <div className="text-center text-gray-400">
-              <h3 className="text-9xl font-bold text-white mb-4">{currentTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</h3>
-              <p className="text-5xl font-light">Aguardando Próxima Chamada</p>
-            </div>
-          )}
-        </main>
-      </div>
-      <div className="w-1/3 h-full bg-gray-800 p-8 flex flex-col">
-        <h3 className="text-4xl font-semibold text-center uppercase mb-6 pb-4 border-b-2 border-gray-600">Em Atendimento</h3>
-        <div className="space-y-6 flex-1">
-          {ultimosChamados.length === 0 && (<div className="h-full flex items-center justify-center text-gray-500 text-2xl">Nenhum atendimento em andamento.</div>)}
-          {ultimosChamados.map(atendimento => (
-            <div key={atendimento.senha} className="bg-gray-700 p-5 rounded-lg shadow-lg border-l-8 border-green-500">
-              <div className="flex justify-between items-baseline mb-1">
-                <h4 className="text-4xl font-bold text-white truncate">{atendimento.cidadao.nome}</h4>
-                <span className="text-3xl font-semibold text-white">{`Guichê ${atendimento.atendente_guiche}`}</span>
-              </div>
-              <p className="text-2xl text-gray-300">{maskCPF(atendimento.cidadao.cpf)}</p>
-              <p className="text-xl font-semibold text-green-300 mt-2">{atendimento.tipo_nome}</p>
-            </div>
-          ))}
+          <div className="mt-6">
+            <div className="text-sm text-gray-600 mb-1">LOCAL DE ATENDIMENTO</div>
+            <div className="font-semibold text-blue-700" style={{ fontSize: '52px' }}>{chamando ? (`Guichê ${chamando.atendente_guiche || '---'}`) : '---'}</div>
+          </div>
+        </div>
+        <div className="basis-[35%] bg-white rounded-lg shadow p-8">
+          <div className="flex flex-col items-center">
+            <img src={LOGO_URL} alt="Logo SEMCAS" className="mb-4" style={{ width: '240px', height: 'auto', maxWidth: '100%' }} />
+            <h3 className="font-semibold mb-3" style={{ fontSize: '28px' }}>Últimas Chamadas</h3>
+          </div>
+          <div className="border-t pt-3">
+            <table className="w-full">
+              <tbody>
+                {ultimosChamados.map((it, idx) => (
+                  <tr key={`${it.senha}-${idx}`} className="border-b">
+                    <td className="py-2 text-gray-700 truncate" style={{ fontSize: '22px' }}>{it.cidadao.nome || '---'}</td>
+                    <td className="py-2 text-right font-semibold text-blue-700" style={{ fontSize: '22px' }}>{`Guichê ${it.atendente_guiche || '---'}`}</td>
+                  </tr>
+                ))}
+                {ultimosChamados.length === 0 && (
+                  [0,1,2,3].map(i => (
+                    <tr key={i} className="border-b"><td className="py-2 text-gray-400" style={{ fontSize: '22px' }}>---</td><td className="py-2 text-right text-gray-400" style={{ fontSize: '22px' }}>---</td></tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+          <audio id="somChamada" src="./chamada.wav" preload="auto"></audio>
         </div>
       </div>
       {error && (<div className="absolute bottom-4 left-4 bg-red-600 text-white p-4 rounded-lg flex items-center"><AlertCircle size={24} className="mr-2" /> {error}</div>)}
@@ -1587,9 +1597,9 @@ function App() {
     }
   };
 
-  // PainelTV SEM layout (sem menu lateral)
+  // PainelTV usa layout quando usuário está logado, caso contrário, renderiza direto
   if (page === 'PainelTV') {
-    return renderPage();
+    return user ? <Layout currentPage={page} setPage={setPage} user={user} userProfile={userProfile} auth={auth}>{renderPage()}</Layout> : renderPage();
   }
 
   // O restante do app usa o Layout
