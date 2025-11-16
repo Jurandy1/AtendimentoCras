@@ -14,6 +14,7 @@ const COR_PRINCIPAL = "#1351B4";
 const COR_PRINCIPAL_HOVER = "#104191";
 const CORES_STATUS = { aguardando: "bg-yellow-100 text-yellow-800 border-yellow-300", chamando: "bg-blue-100 text-blue-800 border-blue-300", em_atendimento: "bg-green-100 text-green-800 border-green-300", finalizado: "bg-gray-100 text-gray-700 border-gray-300" };
 const CORES_TIPO_PADRAO = ['#E53935', '#1E88E5', '#43A047', '#FDD835', '#8E24AA', '#D81B60', '#00ACC1', '#FB8C00'];
+const LOGO_URL = window.__logo_url || 'https://placehold.co/200x60/FFFFFF/1351B4?text=SEMCAS';
 
 const maskCPF = (cpf) => { if (!cpf) return "Não informado"; const cleaned = cpf.replace(/\D/g, ''); if (cleaned.length !== 11) return "CPF inválido"; return `${cleaned.substring(0, 3)}.***.***-${cleaned.substring(9, 11)}`; };
 const formatTime = (timestamp) => { if (!timestamp || !timestamp.toDate) return "--:--"; return timestamp.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); };
@@ -792,7 +793,7 @@ const PainelTV = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList })
     <div className="flex h-screen w-screen bg-gray-900 text-white font-sans overflow-hidden">
       <div className="w-2/3 h-full flex flex-col p-8" style={{ backgroundColor: '#050A1C' }}>
         <header className="flex justify-between items-center mb-6">
-          <img src="https://placehold.co/250x80/FFFFFF/1351B4?text=Logo+Prefeitura" alt="Logo Prefeitura" className="h-16" />
+          <img src={LOGO_URL} alt="Logo SEMCAS" className="h-16" />
           <div className="text-right">
             <h1 className="text-4xl font-bold">{crasAtual?.nome || 'Painel CRAS'}</h1>
             <h2 className="text-5xl font-light tracking-wider">{currentTime.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long' })}</h2>
@@ -1311,21 +1312,33 @@ const Layout = ({ children, currentPage, setPage, user, userProfile, auth }) => 
   const NavLink = ({ item }) => {
     const isActive = currentPage === item.id;
     const IconC = item.icon;
+    const href = `${window.location.pathname}?page=${item.id}`;
+    const handleClick = (e) => {
+      if (e.button === 0 && !(e.ctrlKey || e.metaKey || e.shiftKey || e.altKey)) {
+        e.preventDefault();
+        window.history.pushState({}, '', href);
+        setPage(item.id);
+        setIsMobileMenuOpen(false);
+      }
+    };
     return (
-      <button
-        onClick={() => { setPage(item.id); setIsMobileMenuOpen(false); }}
+      <a
+        href={href}
+        onClick={handleClick}
+        aria-current={isActive ? 'page' : undefined}
+        title={item.label}
         className={`flex items-center w-full px-4 py-3 rounded-lg transition-colors ${isActive ? 'bg-blue-700 text-white shadow-inner' : 'text-blue-100 hover:bg-blue-600 hover:text-white'}`}
         style={{ backgroundColor: isActive ? COR_PRINCIPAL_HOVER : '' }}
       >
         <IconC size={22} className="mr-3" /><span className="font-medium">{item.label}</span>
-      </button>
+      </a>
     );
   };
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full">
       <div className="px-4 py-6 flex items-center">
-        <img src="https://placehold.co/40x40/FFFFFF/1351B4?text=SL" alt="Logo São Luís" className="h-10 w-10 rounded-full mr-3" />
+        <img src={LOGO_URL} alt="Logo SEMCAS" className="h-10 w-auto mr-3" />
         <span className="text-white text-xl font-bold">SEMCAS<br />Atendimento</span>
       </div>
       <nav className="flex-1 px-3 space-y-2">
@@ -1356,7 +1369,7 @@ const Layout = ({ children, currentPage, setPage, user, userProfile, auth }) => 
       )}
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
         <header className="lg:hidden h-16 bg-white shadow-md flex items-center justify-between px-4 z-10">
-          <span className="text-xl font-bold" style={{ color: COR_PRINCIPAL }}>SEMCAS Atendimento</span>
+          <img src={LOGO_URL} alt="Logo SEMCAS" className="h-10" />
           <button onClick={() => setIsMobileMenuOpen(true)}><Menu size={28} className="text-gray-700" /></button>
         </header>
         <main className="flex-1 overflow-y-auto">{children}</main>
