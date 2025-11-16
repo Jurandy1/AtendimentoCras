@@ -1,0 +1,8 @@
+(() => {
+  const { Building, UserCog, Palette } = window.Icons;
+  const { } = window.Utils;
+  const { GerenciarCRAS, GerenciarAtendentes, GerenciarTipos } = window.Components;
+  const { useState } = React;
+  const Administracao = (props) => { const [activeTab, setActiveTab] = useState('cras'); const tabs = [ { id: 'cras', label: 'Unidades CRAS', icon: Building }, { id: 'atendentes', label: 'Atendentes', icon: UserCog }, { id: 'tipos', label: 'Tipos de Atendimento', icon: Palette } ]; const renderTabContent = () => { switch (activeTab) { case 'cras': return React.createElement(GerenciarCRAS, { db: props.db, appId: props.appId }); case 'atendentes': return React.createElement(GerenciarAtendentes, { db: props.db, appId: props.appId, crasUnidades: props.crasUnidades, tiposAtendimento: props.tiposAtendimento }); case 'tipos': return React.createElement(GerenciarTipos, { db: props.db, appId: props.appId }); default: return null; } }; return (<div className="p-6"><h2 className="text-3xl font-bold text-gray-800 mb-6">Administração do Sistema</h2><div className="border-b border-gray-200 mb-6"><nav className="-mb-px flex space-x-6" aria-label="Tabs">{tabs.map(tab => { const IconC = tab.icon; const isActive = activeTab === tab.id; return (<button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm ${isActive ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}><IconC size={18} className="mr-2" />{tab.label}</button>); })}</nav></div><div>{renderTabContent()}</div></div>); };
+  window.Components = window.Components || {}; window.Components.Administracao = Administracao;
+})();

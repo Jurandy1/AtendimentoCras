@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SEMCAS Atendimento</title>
+  <!-- Carregamento do Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Configuração do Firebase Modules -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-auth.js";
+    import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, serverTimestamp, Timestamp, limit, setLogLevel } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js";
+    
+    // Tornando os módulos disponíveis globalmente
+    window.firebaseModules = { 
+      initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
+      getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, 
+      collection, query, where, getDocs, serverTimestamp, Timestamp, limit, setLogLevel 
+    };
+  </script>
+  <!-- Carregamento do React e ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- O Babel é mantido para compilar o JSX no navegador -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+  
+  <!--
+    CORREÇÃO: 
+    Removi todos os scripts de componentes individuais (icons.jsx, utils.jsx, components/*).
+    Seu arquivo 'app.jsx' (71.9 KB) já contém TODOS esses componentes definidos dentro dele.
+    Carregar os outros era redundante.
+  -->
+  
+  <!-- 1. App Principal (Depende de todos os outros) -->
+  <!-- Certifique-se de que o nome do arquivo no seu repositório é 'app.jsx' (minúsculo) -->
+  <script type="text/babel" data-presets="react" src="./scripts/app.jsx"></script>
+
+  <script type="text/babel">
+    // Montagem do componente principal App
+    // Isso agora funcionará porque 'app.jsx' (corrigido) definirá 'App' globalmente.
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
