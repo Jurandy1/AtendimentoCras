@@ -6,7 +6,7 @@ const { useState, useEffect, useMemo, useCallback } = React;
 const {
   initializeApp: _ia, getAuth: _ga, getFirestore, setLogLevel, onAuthStateChanged, signInWithCustomToken, signInAnonymously,
   query, collection, limit, getDocs, onSnapshot, where, doc, updateDoc, addDoc, deleteDoc,
-  serverTimestamp, Timestamp, getDoc
+  serverTimestamp, Timestamp, getDoc, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut
 } = window.firebaseModules || {};
 
 // --- UTILS (Funções Auxiliares) ---
@@ -162,7 +162,7 @@ const GerenciarCRAS = ({ db, appId, crasUnidades, setCrasUnidades }) => {
   );
 };
 
-const GerenciarAtendentes = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList }) => {
+const GerenciarAtendentes = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList, userProfile }) => {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({ nome: '', email: '', senha: '', cras_id: '', guiche: '', tipos_atende: [] });
   const [editingId, setEditingId] = useState(null);
@@ -182,7 +182,7 @@ const GerenciarAtendentes = ({ db, appId, crasUnidades, tiposAtendimento, atende
     });
   };
 
-  const resetForm = () => { setFormData({ nome: '', email: '', senha: '', cras_id: '', guiche: '', tipos_atende: [] }); setEditingId(null); setShowModal(false); setShowPassword(false); };
+  const resetForm = () => { setFormData({ nome: '', email: '', senha: '', cras_id: userProfile?.cras_id || '', guiche: '', tipos_atende: [] }); setEditingId(null); setShowModal(false); setShowPassword(false); };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -208,6 +208,8 @@ const GerenciarAtendentes = ({ db, appId, crasUnidades, tiposAtendimento, atende
   };
   const handleDelete = async (id) => { try { await deleteDoc(doc(db, collectionPath, id)); } catch (error) { console.error("Erro ao deletar Atendente:", error); } };
 
+  const listFiltered = (userProfile?.role === 'coordenadora' && userProfile?.cras_id) ? atendentesList.filter(a => a.cras_id === userProfile.cras_id) : atendentesList;
+
   return (
     <div className="p-4">
       <div className="flex justify-between items-center mb-4">
@@ -230,7 +232,7 @@ const GerenciarAtendentes = ({ db, appId, crasUnidades, tiposAtendimento, atende
                   {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
-              <select name="cras_id" value={formData.cras_id} onChange={handleChange} required className="w-full p-2 border rounded-lg bg-white">
+              <select name="cras_id" value={formData.cras_id} onChange={handleChange} required className="w-full p-2 border rounded-lg bg-white" disabled={userProfile?.role !== 'superintendente'}>
                 <option value="">Selecione a Unidade CRAS</option>
                 {crasUnidades.map(cras => (<option key={cras.id} value={cras.id}>{cras.nome}</option>))}
               </select>
@@ -268,7 +270,7 @@ const GerenciarAtendentes = ({ db, appId, crasUnidades, tiposAtendimento, atende
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {atendentesList.map(a => (
+              {listFiltered.map(a => (
                 <tr key={a.id}>
                   <td className="p-3">{a.nome}</td>
                   <td className="p-3">{getCrasNome(a.cras_id)}</td>
@@ -389,18 +391,173 @@ const GerenciarTipos = ({ db, appId, tiposAtendimento, setTiposAtendimento }) =>
   );
 };
 
+function GerenciarUsuarios({ db, appId, crasUnidades, userProfile, auth }) {
+  const [usuarios, setUsuarios] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [formData, setFormData] = useState({ email: '', nome: '', role: 'recepcionista', cras_id: '', senha: '' });
+  const [editingId, setEditingId] = useState(null);
+  const [showModal, setShowModal] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+  const collectionPath = `artifacts/${appId}/public/data/users_by_email`;
+
+  useEffect(() => {
+    if (!db) return;
+    const q = query(collection(db, collectionPath));
+    const unsub = onSnapshot(q, (snap) => {
+      let list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (userProfile?.role === 'coordenadora' && userProfile?.cras_id) {
+        list = list.filter(u => u.cras_id === userProfile.cras_id);
+      }
+      setUsuarios(list);
+      setLoading(false);
+    }, () => setLoading(false));
+    return () => unsub();
+  }, [db, appId]);
+
+  const handleChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
+  const resetForm = () => { setFormData({ email: '', nome: '', role: 'recepcionista', cras_id: userProfile?.role === 'coordenadora' ? (userProfile.cras_id || '') : '', senha: '' }); setEditingId(null); setShowModal(false); setSaving(false); setError(null); setSuccess(null); };
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!db || !formData.email) return;
+    if (userProfile?.role === 'coordenadora' && !['recepcionista','atendente'].includes(formData.role)) { setError('Coordenadora só pode criar Recepcionista ou Atendente.'); return; }
+    const ref = doc(db, collectionPath, formData.email);
+    try {
+      setSaving(true);
+      setError(null);
+      setSuccess(null);
+      // Tenta criar via Cloud Function primeiro
+      let cfOk = false; let genPwd = null;
+      if (auth) {
+        try {
+          const token = await auth.currentUser.getIdToken();
+          const cfUrl = (window.__cf_url) || `https://us-central1-crasatendimento-35796.cloudfunctions.net/createUser?appId=${appId}`;
+          const resp = await fetch(cfUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ email: formData.email, password: formData.senha || '', nome: formData.nome || '', role: formData.role, cras_id: formData.cras_id || '' }) });
+          const data = await resp.json().catch(() => ({}));
+          if (resp.ok) { cfOk = true; genPwd = data.passwordGenerated || null; }
+        } catch (_) {}
+      }
+      // Criar usuário no Firebase Authentication usando uma instância secundária
+      if (!cfOk && auth && formData.email) {
+        try {
+          const cfg = auth.app.options || {};
+          const secName = `secondary-${Date.now()}`;
+          const secApp = _ia(cfg, secName);
+          const secAuth = _ga(secApp);
+          const pwd = formData.senha && formData.senha.length >= 6 ? formData.senha : Math.random().toString(36).slice(-10);
+          let uidCreated = null;
+          try {
+            const cred = await createUserWithEmailAndPassword(secAuth, formData.email, pwd);
+            uidCreated = cred?.user?.uid || null;
+          } catch (eAuth) {
+            if (!(eAuth && eAuth.code === 'auth/email-already-in-use')) throw eAuth;
+          }
+          if (uidCreated) {
+            try {
+              const uref = doc(db, `artifacts/${appId}/public/data/users`, uidCreated);
+              await setDoc(uref, { email: formData.email, nome: formData.nome || '', role: formData.role, cras_id: formData.cras_id || '' });
+            } catch (_) {}
+          }
+        } catch (eInit) {
+          // ignora falha de criação no Auth para não bloquear perfil
+        }
+      }
+      if (editingId) { await updateDoc(ref, formData); } else { await setDoc(ref, formData); }
+      if (cfOk && genPwd) { setSuccess(`Usuário criado. Senha: ${genPwd}`); }
+      resetForm();
+    } catch (e2) { setSaving(false); setError('Permissão insuficiente ou erro ao salvar.'); }
+  };
+  const handleEdit = (u) => { setFormData({ email: u.email, nome: u.nome || '', role: u.role || 'recepcionista', cras_id: u.cras_id || '' }); setEditingId(u.id); setShowModal(true); setError(null); };
+  const handleDelete = async (id) => { try { await deleteDoc(doc(db, collectionPath, id)); } catch (e3) { setError('Permissão insuficiente ou erro ao deletar.'); } };
+
+  return (
+    <div className="p-4">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-2xl font-semibold">Gerenciar Usuários</h3>
+        <button onClick={() => { resetForm(); setShowModal(true); }} className="flex items-center bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700">Novo Usuário</button>
+      </div>
+      {showModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-lg">
+            <h4 className="text-xl font-semibold mb-4">{editingId ? 'Editar Usuário' : 'Novo Usuário'}</h4>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <input name="email" type="email" value={formData.email} onChange={handleChange} placeholder="Email" required className="w-full p-2 border rounded" />
+              <input name="nome" value={formData.nome} onChange={handleChange} placeholder="Nome" className="w-full p-2 border rounded" />
+              <input name="senha" type="password" value={formData.senha} onChange={handleChange} placeholder="Senha inicial (mín. 6, opcional)" className="w-full p-2 border rounded" />
+              <select name="role" value={formData.role} onChange={handleChange} className="w-full p-2 border rounded bg-white">
+                <option value="recepcionista">Recepcionista</option>
+                <option value="atendente">Atendente</option>
+                {userProfile?.role === 'superintendente' && (<>
+                  <option value="coordenadora">Coordenadora</option>
+                  <option value="superintendente">Superintendente</option>
+                </>)}
+              </select>
+              <select name="cras_id" value={formData.cras_id} onChange={handleChange} className="w-full p-2 border rounded bg-white" disabled={userProfile?.role === 'coordenadora'}>
+                <option value="">Sem CRAS</option>
+                {crasUnidades.map(cras => (<option key={cras.id} value={cras.id}>{cras.nome}</option>))}
+              </select>
+              {success && <p className="text-green-600 text-sm">{success}</p>}
+              {error && <p className="text-red-600 text-sm">{error}</p>}
+              <div className="flex justify-end space-x-2">
+                <button type="button" onClick={resetForm} className="px-4 py-2 bg-gray-200 rounded">Cancelar</button>
+                <button type="submit" disabled={saving} className="px-4 py-2 bg-blue-600 text-white rounded">{saving ? 'Salvando...' : (editingId ? 'Atualizar' : 'Salvar')}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {loading ? (<p>Carregando usuários...</p>) : (
+        <div className="bg-white shadow rounded-lg overflow-x-auto">
+          <table className="w-full min-w-[700px]">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="p-3 text-left text-sm font-semibold text-gray-600">Email</th>
+                <th className="p-3 text-left text-sm font-semibold text-gray-600">Nome</th>
+                <th className="p-3 text-left text-sm font-semibold text-gray-600">Papel</th>
+                <th className="p-3 text-left text-sm font-semibold text-gray-600">CRAS</th>
+                <th className="p-3 text-left text-sm font-semibold text-gray-600">Ações</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {usuarios.map(u => (
+                <tr key={u.id}>
+                  <td className="p-3">{u.email}</td>
+                  <td className="p-3">{u.nome}</td>
+                  <td className="p-3">{u.role}</td>
+                  <td className="p-3">{crasUnidades.find(c => c.id === u.cras_id)?.nome || '-'}</td>
+                  <td className="p-3">
+                    <div className="flex space-x-2">
+                      <button onClick={() => handleEdit(u)} className="text-blue-600 hover:text-blue-800"><Edit size={18} /></button>
+                      <button onClick={() => handleDelete(u.id)} className="text-red-600 hover:text-red-800"><Trash2 size={18} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const Administracao = (props) => {
   const [activeTab, setActiveTab] = useState('cras');
-  const tabs = [
+  const role = props.userProfile?.role || '';
+  const tabsAll = [
     { id: 'cras', label: 'Unidades CRAS', icon: Building },
     { id: 'atendentes', label: 'Atendentes', icon: UserCog },
+    { id: 'usuarios', label: 'Usuários', icon: Users },
     { id: 'tipos', label: 'Tipos de Atendimento', icon: Palette }
   ];
+  const tabs = role === 'superintendente' ? tabsAll : role === 'coordenadora' ? tabsAll.filter(t => ['atendentes','usuarios'].includes(t.id)) : [];
 
   const renderTabContent = () => {
     switch (activeTab) {
       case 'cras': return <GerenciarCRAS {...props} />;
       case 'atendentes': return <GerenciarAtendentes {...props} />;
+      case 'usuarios': return <GerenciarUsuarios {...props} />;
       case 'tipos': return <GerenciarTipos {...props} />;
       default: return null;
     }
@@ -409,6 +566,7 @@ const Administracao = (props) => {
   return (
     <div className="p-6">
       <h2 className="text-3xl font-bold text-gray-800 mb-6">Administração do Sistema</h2>
+      {tabs.length === 0 && (<p className="text-gray-600">Você não tem acesso a esta área.</p>)}
       <div className="border-b border-gray-200 mb-6">
         <nav className="-mb-px flex space-x-6" aria-label="Tabs">
           {tabs.map(tab => {
@@ -427,12 +585,18 @@ const Administracao = (props) => {
   );
 };
 
-const Recepcao = ({ db, appId, tiposAtendimento, crasUnidades }) => {
+const Recepcao = ({ db, appId, tiposAtendimento, crasUnidades, userProfile }) => {
   const [formData, setFormData] = useState({ nome: '', cpf: '', telefone: '', dataNascimento: '', sexo: '', cras_id: '', tipo_atendimento_id: '' });
   const [gerandoSenha, setGerandoSenha] = useState(false);
   const [senhaGerada, setSenhaGerada] = useState(null);
   const [error, setError] = useState(null);
   const collectionPath = `artifacts/${appId}/public/data/atendimentos`;
+
+  useEffect(() => {
+    if (userProfile?.cras_id) {
+      setFormData(prev => ({ ...prev, cras_id: userProfile.cras_id }));
+    }
+  }, [userProfile]);
 
   const handleChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
 
@@ -523,7 +687,7 @@ const Recepcao = ({ db, appId, tiposAtendimento, crasUnidades }) => {
           <option value="F">Feminino</option>
           <option value="M">Masculino</option>
         </select>
-        <select name="cras_id" value={formData.cras_id} onChange={handleChange} required className="p-2 border rounded-lg bg-white">
+        <select name="cras_id" value={formData.cras_id} onChange={handleChange} required className="p-2 border rounded-lg bg-white" disabled={userProfile?.role !== 'superintendente'}>
           <option value="">Unidade CRAS</option>
           {crasUnidades.map(cras => (<option key={cras.id} value={cras.id}>{cras.nome}</option>))}
         </select>
@@ -681,7 +845,7 @@ const PainelTV = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList })
   );
 };
 
-const Atendente = ({ db, auth, appId, crasUnidades, tiposAtendimento, atendentesList }) => {
+const Atendente = ({ db, auth, appId, crasUnidades, tiposAtendimento, atendentesList, user, userProfile }) => {
   const [selectedAtendente, setSelectedAtendente] = useState(null);
   const [filaAguardando, setFilaAguardando] = useState([]);
   const [atendimentoAtual, setAtendimentoAtual] = useState(null);
@@ -689,6 +853,13 @@ const Atendente = ({ db, auth, appId, crasUnidades, tiposAtendimento, atendentes
   const [loadingAtual, setLoadingAtual] = useState(false);
   const [observacoes, setObservacoes] = useState("");
   const collectionPath = `artifacts/${appId}/public/data/atendimentos`;
+
+  useEffect(() => {
+    if (!selectedAtendente && userProfile?.role === 'atendente' && user && atendentesList && atendentesList.length > 0) {
+      const match = atendentesList.find(a => (a.email || '').toLowerCase() === (user.email || '').toLowerCase());
+      if (match) setSelectedAtendente(match);
+    }
+  }, [user, userProfile, atendentesList, selectedAtendente]);
 
   // Listener da Fila
   useEffect(() => {
@@ -923,12 +1094,18 @@ const Dashboard = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList }
   );
 };
 
-const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento }) => {
+const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) => {
   const [filters, setFilters] = useState({ dataInicio: '', dataFim: '', cras_id: 'todos', tipo_atendimento_id: 'todos', status: 'todos' });
   const [reportData, setReportData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const collectionPath = `artifacts/${appId}/public/data/atendimentos`;
+
+  useEffect(() => {
+    if (userProfile?.role === 'coordenadora' && userProfile?.cras_id) {
+      setFilters(prev => ({ ...prev, cras_id: userProfile.cras_id }));
+    }
+  }, [userProfile]);
 
   const handleChange = (e) => { const { name, value } = e.target; setFilters(prev => ({ ...prev, [name]: value })); };
 
@@ -1078,7 +1255,7 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento }) => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-4">
           <input name="dataInicio" type="date" value={filters.dataInicio} onChange={handleChange} className="w-full p-2 border rounded-lg text-gray-600" title="Data Início" />
           <input name="dataFim" type="date" value={filters.dataFim} onChange={handleChange} className="w-full p-2 border rounded-lg text-gray-600" title="Data Fim" />
-          <select name="cras_id" value={filters.cras_id} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white">
+          <select name="cras_id" value={filters.cras_id} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white" disabled={userProfile?.role === 'coordenadora'}>
             <option value="todos">Todas Unidades CRAS</option>
             {crasUnidades.map(cras => <option key={cras.id} value={cras.id}>{cras.nome}</option>)}
           </select>
@@ -1112,7 +1289,7 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento }) => {
   );
 };
 
-const Layout = ({ children, currentPage, setPage, user }) => {
+const Layout = ({ children, currentPage, setPage, user, userProfile, auth }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const menuItems = [
     { id: 'Recepcao', label: 'Recepção', icon: Home },
@@ -1122,6 +1299,14 @@ const Layout = ({ children, currentPage, setPage, user }) => {
     { id: 'Relatorios', label: 'Relatórios', icon: FileText },
     { id: 'Administracao', label: 'Administração', icon: Settings }
   ];
+  const role = userProfile?.role || '';
+  const allowed = {
+    recepcionista: ['Recepcao', 'PainelTV'],
+    atendente: ['Atendente', 'PainelTV'],
+    coordenadora: ['Recepcao', 'Atendente', 'PainelTV', 'Administracao'],
+    superintendente: ['Recepcao', 'PainelTV', 'Atendente', 'Dashboard', 'Relatorios', 'Administracao']
+  };
+  const visibleItems = menuItems.filter(m => (allowed[role] || []).includes(m.id));
 
   const NavLink = ({ item }) => {
     const isActive = currentPage === item.id;
@@ -1144,12 +1329,12 @@ const Layout = ({ children, currentPage, setPage, user }) => {
         <span className="text-white text-xl font-bold">SEMCAS<br />Atendimento</span>
       </div>
       <nav className="flex-1 px-3 space-y-2">
-        {menuItems.map(item => <NavLink key={item.id} item={item} />)}
+        {visibleItems.map(item => <NavLink key={item.id} item={item} />)}
       </nav>
       <div className="p-4 border-t border-blue-600">
         <p className="text-white font-semibold truncate">{user?.email || 'Usuário Anônimo'}</p>
         <p className="text-sm text-blue-200 truncate">{user?.uid}</p>
-        <button className="flex items-center w-full mt-3 px-3 py-2 rounded-lg text-blue-100 hover:bg-blue-600 hover:text-white transition-colors">
+        <button onClick={() => auth && signOut(auth)} className="flex items-center w-full mt-3 px-3 py-2 rounded-lg text-blue-100 hover:bg-blue-600 hover:text-white transition-colors">
           <LogOut size={18} className="mr-2" />Sair
         </button>
       </div>
@@ -1208,6 +1393,8 @@ function App() {
   const [tiposAtendimento, setTiposAtendimento] = useState([]);
   const [atendentesList, setAtendentesList] = useState([]);
   const [isLoadingGlobalData, setIsLoadingGlobalData] = useState(true);
+  const [userProfile, setUserProfile] = useState(null);
+  const SUPER_UID = 'bgdgNn2iwJNU9kV0LJ2hntokCWm2';
 
   // 1. Inicialização e Autenticação Firebase
   useEffect(() => {
@@ -1226,22 +1413,35 @@ function App() {
       setAuth(authInstance);
 
       const unsubscribe = onAuthStateChanged(authInstance, async (u) => {
+        setUser(u || null);
+        setAuthError(null);
+        setIsAuthReady(true);
         if (u) {
-          setUser(u);
-          setAuthError(null);
-          setIsAuthReady(true);
-          setIsLoadingGlobalData(true); // Reinicia o carregamento de dados após o login
-        } else {
           try {
-            const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-            if (token) { await signInWithCustomToken(authInstance, token); }
-            else { await signInAnonymously(authInstance); }
-          } catch (err) {
-            console.error("Erro na autenticação:", err);
-            setAuthError('Falha na autenticação. Verifique sua conexão ou regras do Firestore.');
-            setIsAuthReady(false);
-            setIsLoadingGlobalData(false);
+            const baseRole = u.uid === SUPER_UID ? 'superintendente' : 'recepcionista';
+            const baseData = { email: u.email || '', nome: u.displayName || '', role: baseRole, cras_id: '' };
+            setUserProfile({ id: u.uid, ...baseData });
+
+            const userDocRef = doc(dbInstance, `artifacts/${appId}/public/data/users`, u.uid);
+            const snap = await getDoc(userDocRef);
+            if (snap.exists()) {
+              setUserProfile({ id: u.uid, ...snap.data() });
+            } else {
+              const byEmailRef = doc(dbInstance, `artifacts/${appId}/public/data/users_by_email`, u.email || '');
+              const emailSnap = await getDoc(byEmailRef);
+              if (emailSnap.exists()) {
+                const data = emailSnap.data();
+                try { await updateDoc(userDocRef, data); } catch (_) { try { await setDoc(userDocRef, data); } catch (_) {} }
+                setUserProfile({ id: u.uid, ...data });
+              } else {
+                try { await setDoc(userDocRef, baseData); } catch (_) {}
+              }
+            }
+          } catch (e) {
+            // mantém baseData já setado em memória
           }
+        } else {
+          setUserProfile(null);
         }
       });
       return () => unsubscribe();
@@ -1255,7 +1455,8 @@ function App() {
 
   // 2. Carregamento de Dados Globais (Firestore)
   useEffect(() => {
-    if (!isAuthReady || !db || !user) return;
+    if (!db) return;
+    if (!user && page !== 'PainelTV') return;
 
     setIsLoadingGlobalData(true);
 
@@ -1281,7 +1482,7 @@ function App() {
     });
 
     return () => { unsubscribers.forEach(unsub => unsub()); };
-  }, [isAuthReady, db, user, appId]);
+  }, [db, appId, user, page]);
 
   // 3. Controle de Rota (URL)
   useEffect(() => {
@@ -1298,6 +1499,29 @@ function App() {
     window.addEventListener('popstate', handleUrlChange);
     return () => window.removeEventListener('popstate', handleUrlChange);
   }, []);
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const pageFromUrl = params.get('page');
+      if (!pageFromUrl && userProfile?.role === 'superintendente') {
+        setPage('Administracao');
+      }
+    } catch (_) {}
+  }, [userProfile]);
+
+  useEffect(() => {
+    if (!userProfile) return;
+    if (page === 'PainelTV') {
+      const role = userProfile.role;
+      let start = 'PainelTV';
+      if (role === 'superintendente') start = 'Administracao';
+      else if (role === 'recepcionista') start = 'Recepcao';
+      else if (role === 'atendente') start = 'Atendente';
+      else if (role === 'coordenadora') start = 'Relatorios';
+      setPage(start);
+    }
+  }, [userProfile, page]);
 
   const renderPage = () => {
     if (authError) {
@@ -1319,31 +1543,79 @@ function App() {
       );
     }
 
-    if (!isAuthReady || isLoadingGlobalData || !user) {
-      return (
-        <div className='flex flex-col items-center justify-center h-screen bg-gray-100'>
-          <Loader className='animate-spin h-20 w-20' style={{ color: COR_PRINCIPAL }} />
-          <p className='text-lg text-gray-600 mt-4'>{auth ? 'Carregando dados do sistema...' : 'Autenticando...'}</p>
-        </div>
-      );
+    if (page !== 'PainelTV' && (!isAuthReady || !user)) {
+      return <Login auth={auth} db={db} appId={appId} />;
     }
 
-    const pageProps = { db, auth, appId, user, crasUnidades, tiposAtendimento, atendentesList };
+    const pageProps = { db, auth, appId, user, userProfile, crasUnidades, tiposAtendimento, atendentesList };
+    const role = userProfile?.role || '';
+    const can = (p) => {
+      if (p === 'PainelTV') return true;
+      if (role === 'superintendente') return true;
+      if (role === 'recepcionista') return ['Recepcao', 'PainelTV'].includes(p);
+      if (role === 'atendente') return ['Atendente', 'PainelTV'].includes(p);
+      if (role === 'coordenadora') return ['Recepcao','Atendente','PainelTV','Administracao'].includes(p);
+      return false;
+    };
 
     switch (page) {
-      case 'Recepcao': return <Recepcao {...pageProps} />;
+      case 'Recepcao': return can('Recepcao') ? <Recepcao {...pageProps} /> : <PainelTV {...pageProps} />;
       case 'PainelTV': return <PainelTV {...pageProps} />;
-      case 'Atendente': return <Atendente {...pageProps} />;
-      case 'Dashboard': return <Dashboard {...pageProps} />;
-      case 'Relatorios': return <Relatorios {...pageProps} />;
-      case 'Administracao': return <Administracao {...pageProps} />;
-      default: return <Recepcao {...pageProps} />;
+      case 'Atendente': return can('Atendente') ? <Atendente {...pageProps} /> : <PainelTV {...pageProps} />;
+      case 'Dashboard': return can('Dashboard') ? <Dashboard {...pageProps} /> : <PainelTV {...pageProps} />;
+      case 'Relatorios': return can('Relatorios') ? <Relatorios {...pageProps} /> : <PainelTV {...pageProps} />;
+      case 'Administracao': return can('Administracao') ? <Administracao {...pageProps} /> : <PainelTV {...pageProps} />;
+      default: return <PainelTV {...pageProps} />;
     }
   };
 
-  // O PainelTV não usa o layout de navegação lateral
-  if (page === 'PainelTV') { return renderPage(); }
+  // PainelTV usa layout quando usuário está logado, caso contrário, renderiza direto
+  if (page === 'PainelTV') {
+    return user ? <Layout currentPage={page} setPage={setPage} user={user} userProfile={userProfile} auth={auth}>{renderPage()}</Layout> : renderPage();
+  }
 
   // O restante do app usa o Layout
-  return <Layout currentPage={page} setPage={setPage} user={user}>{renderPage()}</Layout>;
+  return <Layout currentPage={page} setPage={setPage} user={user} userProfile={userProfile} auth={auth}>{renderPage()}</Layout>;
+}
+function Login({ auth, db, appId }) {
+  const [email, setEmail] = useState('');
+  const [senha, setSenha] = useState('');
+  const [isRegister, setIsRegister] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!auth) return;
+    setLoading(true);
+    setError(null);
+    try {
+      if (isRegister) {
+        const cred = await createUserWithEmailAndPassword(auth, email, senha);
+        const byEmailRef = doc(db, `artifacts/${appId}/public/data/users_by_email`, email);
+        await setDoc(byEmailRef, { email, nome: cred.user.displayName || '', role: 'recepcionista', cras_id: '' });
+      } else {
+        await signInWithEmailAndPassword(auth, email, senha);
+      }
+    } catch (e2) {
+      setError('Falha na autenticação');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-center h-screen bg-gray-100">
+      <div className="bg-white shadow-lg rounded-lg p-8 w-full max-w-md">
+        <h2 className="text-2xl font-bold text-gray-800 mb-4">{isRegister ? 'Cadastro' : 'Entrar'}</h2>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" required className="w-full p-3 border rounded" />
+          <input type="password" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="Senha" required className="w-full p-3 border rounded" />
+          <button type="submit" disabled={loading} className="w-full bg-blue-600 text-white py-2 rounded">{loading ? 'Aguarde...' : isRegister ? 'Cadastrar' : 'Entrar'}</button>
+        </form>
+        {error && <p className="text-red-600 text-sm mt-3">{error}</p>}
+        <button onClick={() => setIsRegister(!isRegister)} className="mt-4 text-blue-600">{isRegister ? 'Já tenho conta' : 'Criar nova conta'}</button>
+      </div>
+    </div>
+  );
 }

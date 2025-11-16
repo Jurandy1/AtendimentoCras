@@ -9,12 +9,12 @@
   <!-- Configuração do Firebase Modules -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-auth.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-auth.js";
     import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, serverTimestamp, Timestamp, limit, setLogLevel } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js";
     
     // Tornando os módulos disponíveis globalmente
     window.firebaseModules = { 
-      initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
+      initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, 
       getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, 
       collection, query, where, getDocs, serverTimestamp, Timestamp, limit, setLogLevel 
     };
