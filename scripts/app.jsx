@@ -587,7 +587,7 @@ const Administracao = (props) => {
 };
 
 const Recepcao = ({ db, appId, tiposAtendimento, crasUnidades, userProfile }) => {
-  const [formData, setFormData] = useState({ nome: '', cpf: '', telefone: '', dataNascimento: '', sexo: '', cras_id: '', tipo_atendimento_id: '' });
+  const [formData, setFormData] = useState({ nome: '', cpf: '', telefone: '', dataNascimento: '', sexo: '', cras_id: '', tipo_atendimento_id: '', prioridade: 'Nenhuma', cep: '', enderecoRua: '', enderecoNumero: '', enderecoBairro: '', enderecoCidade: '', enderecoUf: '', observacoes: '', lgpdConsent: false });
   const [gerandoSenha, setGerandoSenha] = useState(false);
   const [senhaGerada, setSenhaGerada] = useState(null);
   const [error, setError] = useState(null);
@@ -599,11 +599,17 @@ const Recepcao = ({ db, appId, tiposAtendimento, crasUnidades, userProfile }) =>
     }
   }, [userProfile]);
 
-  const handleChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
+  const handleChange = (e) => { const { name, value, type, checked } = e.target; setFormData(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value })); };
+  const handleCpfChange = (e) => { const v = e.target.value.replace(/\D/g, '').slice(0, 11); const masked = v.replace(/(\d{3})(\d{3})(\d{3})(\d{2})?/, (m, a, b, c, d) => d ? `${a}.${b}.${c}-${d}` : `${a}.${b}.${c}`); setFormData(prev => ({ ...prev, cpf: masked })); };
+  const handlePhoneChange = (e) => { const v = e.target.value.replace(/\D/g, '').slice(0, 11); const masked = v.length > 10 ? v.replace(/(\d{2})(\d{5})(\d{4})/, '($1) $2-$3') : v.replace(/(\d{2})(\d{4})(\d{4})/, '($1) $2-$3'); setFormData(prev => ({ ...prev, telefone: masked })); };
+  const handleCepChange = (e) => { const v = e.target.value.replace(/\D/g, '').slice(0, 8); const masked = v.replace(/(\d{5})(\d{3})/, '$1-$2'); setFormData(prev => ({ ...prev, cep: masked })); };
+  useEffect(() => { const digits = formData.cep.replace(/\D/g, ''); if (digits.length === 8) { fetch(`https://viacep.com.br/ws/${digits}/json/`).then(r => r.json()).then(d => { if (d && !d.erro) { setFormData(prev => ({ ...prev, enderecoRua: d.logradouro || '', enderecoBairro: d.bairro || '', enderecoCidade: d.localidade || '', enderecoUf: d.uf || '' })); } }); } }, [formData.cep]);
 
   const handleGerarSenha = async (e) => {
     e.preventDefault();
-    if (!db || !formData.cras_id || !formData.tipo_atendimento_id) { setError("Por favor, preencha todos os campos obrigatórios."); return; }
+    const cpfDigits = formData.cpf.replace(/\D/g, '');
+    const enderecoOk = formData.enderecoRua && formData.enderecoBairro && formData.enderecoCidade;
+    if (!db || !formData.nome || !cpfDigits || !formData.dataNascimento || !formData.cras_id || !formData.tipo_atendimento_id || !enderecoOk || !formData.lgpdConsent) { setError("Por favor, preencha os campos obrigatórios e aceite o consentimento."); return; }
 
     setGerandoSenha(true);
     setError(null);
@@ -621,10 +627,21 @@ const Recepcao = ({ db, appId, tiposAtendimento, crasUnidades, userProfile }) =>
       const senha = `${prefixo}${ultimosDigitos}`;
       // --- FIM DA CORREÇÃO ---
 
-      const dadosCidadao = { nome: formData.nome, cpf: formData.cpf.replace(/\D/g, ''), telefone: formData.telefone, dataNascimento: formData.dataNascimento, sexo: formData.sexo };
+      const dadosCidadao = { nome: formData.nome, cpf: formData.cpf.replace(/\D/g, ''), telefone: formData.telefone.replace(/\D/g, ''), dataNascimento: formData.dataNascimento, sexo: formData.sexo, prioridade: formData.prioridade, cep: formData.cep.replace(/\D/g, ''), endereco: { rua: formData.enderecoRua, numero: formData.enderecoNumero, bairro: formData.enderecoBairro, cidade: formData.enderecoCidade, uf: formData.enderecoUf } };
       const docData = {
-        cidadao: dadosCidadao, senha: senha, cras_id: formData.cras_id, tipo_atendimento_id: formData.tipo_atendimento_id,
-        status: "aguardando", hora_chegada: serverTimestamp(), atendente_id: null, hora_chamada: null, hora_inicio: null, hora_fim: null, observacoes: ""
+        cidadao: dadosCidadao,
+        senha: senha,
+        cras_id: formData.cras_id,
+        tipo_atendimento_id: formData.tipo_atendimento_id,
+        status: "aguardando",
+        hora_chegada: serverTimestamp(),
+        atendente_id: null,
+        hora_chamada: null,
+        hora_inicio: null,
+        hora_fim: null,
+        observacoes: formData.observacoes,
+        created_by: userProfile?.uid || null,
+        created_role: userProfile?.role || null
       };
 
       const docRef = await addDoc(collection(db, collectionPath), docData);
@@ -679,27 +696,25 @@ const Recepcao = ({ db, appId, tiposAtendimento, crasUnidades, userProfile }) =>
     <div className="p-6">
       <h2 className="text-3xl font-bold text-gray-800 mb-6">Recepção</h2>
       <form onSubmit={handleGerarSenha} className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-white p-4 rounded-lg shadow">
-        <input name="nome" value={formData.nome} onChange={handleChange} placeholder="Nome Completo" required className="p-2 border rounded-lg" />
-        <input name="cpf" value={formData.cpf} onChange={handleChange} placeholder="CPF" required className="p-2 border rounded-lg" />
-        <input name="telefone" value={formData.telefone} onChange={handleChange} placeholder="Telefone" className="p-2 border rounded-lg" />
-        <input name="dataNascimento" type="date" value={formData.dataNascimento} onChange={handleChange} className="p-2 border rounded-lg" />
-        <select name="sexo" value={formData.sexo} onChange={handleChange} className="p-2 border rounded-lg bg-white">
-          <option value="">Sexo</option>
-          <option value="F">Feminino</option>
-          <option value="M">Masculino</option>
-        </select>
-        <select name="cras_id" value={formData.cras_id} onChange={handleChange} required className="p-2 border rounded-lg bg-white" disabled={userProfile?.role !== 'superintendente'}>
-          <option value="">Unidade CRAS</option>
-          {crasUnidades.map(cras => (<option key={cras.id} value={cras.id}>{cras.nome}</option>))}
-        </select>
-        <select name="tipo_atendimento_id" value={formData.tipo_atendimento_id} onChange={handleChange} required className="p-2 border rounded-lg bg-white">
-          <option value="">Tipo de Atendimento</option>
-          {tiposAtendimento.map(tipo => (<option key={tipo.id} value={tipo.id}>{tipo.nome}</option>))}
-        </select>
-
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Nome Completo *</span><input name="nome" value={formData.nome} onChange={handleChange} required className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">CPF *</span><input name="cpf" value={formData.cpf} onChange={handleCpfChange} required className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Telefone (WhatsApp)</span><input name="telefone" value={formData.telefone} onChange={handlePhoneChange} className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Data de Nascimento *</span><input name="dataNascimento" type="date" value={formData.dataNascimento} onChange={handleChange} required className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Sexo</span><select name="sexo" value={formData.sexo} onChange={handleChange} className="p-2 border rounded-lg bg-white"><option value="">Selecionar</option><option value="F">Feminino</option><option value="M">Masculino</option><option value="O">Outro</option><option value="N">Não informar</option></select></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Prioridade</span><select name="prioridade" value={formData.prioridade} onChange={handleChange} className="p-2 border rounded-lg bg-white"><option>Nenhuma</option><option>Idoso</option><option>Deficiência</option><option>Gestante/Lactante</option><option>Criança de colo</option><option>Obeso</option><option>Outra</option></select></label>
+        <label className="flex flex-col md:col-span-2"><span className="text-sm text-gray-600">CEP</span><input name="cep" value={formData.cep} onChange={handleCepChange} className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Rua *</span><input name="enderecoRua" value={formData.enderecoRua} onChange={handleChange} required className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Número</span><input name="enderecoNumero" value={formData.enderecoNumero} onChange={handleChange} className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Bairro *</span><input name="enderecoBairro" value={formData.enderecoBairro} onChange={handleChange} required className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Cidade *</span><input name="enderecoCidade" value={formData.enderecoCidade} onChange={handleChange} required className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">UF</span><input name="enderecoUf" value={formData.enderecoUf} onChange={handleChange} className="p-2 border rounded-lg" /></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Unidade CRAS *</span><select name="cras_id" value={formData.cras_id} onChange={handleChange} required className="p-2 border rounded-lg bg-white" disabled={userProfile?.role !== 'superintendente'}><option value="">Selecionar</option>{crasUnidades.map(cras => (<option key={cras.id} value={cras.id}>{cras.nome}</option>))}</select></label>
+        <label className="flex flex-col"><span className="text-sm text-gray-600">Tipo de Atendimento *</span><select name="tipo_atendimento_id" value={formData.tipo_atendimento_id} onChange={handleChange} required className="p-2 border rounded-lg bg-white"><option value="">Selecionar</option>{tiposAtendimento.map(tipo => (<option key={tipo.id} value={tipo.id}>{tipo.nome}</option>))}</select></label>
+        <label className="flex flex-col md:col-span-2"><span className="text-sm text-gray-600">Observações</span><input name="observacoes" value={formData.observacoes} onChange={handleChange} className="p-2 border rounded-lg" /></label>
+        <div className="md:col-span-2 flex items-center space-x-2"><input id="lgpd" type="checkbox" name="lgpdConsent" checked={formData.lgpdConsent} onChange={handleChange} className="h-5 w-5" /><label htmlFor="lgpd" className="text-sm text-gray-700">Consentimento LGPD *</label></div>
         <div className="md:col-span-2 flex justify-end">
           <button type="submit" disabled={gerandoSenha} className="flex items-center bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 disabled:bg-gray-400">
-            {gerandoSenha ? <Loader className="animate-spin mr-2" /> : <Plus size={18} className="mr-2" />} Gerar Senha
+            {gerandoSenha ? <Loader className="animate-spin mr-2" /> : <Plus size={18} className="mr-2" />} Gerar Cadastro e Entrar na Fila
           </button>
         </div>
         {error && <p className="md:col-span-2 text-red-600">{error}</p>}
@@ -863,6 +878,7 @@ const Atendente = ({ db, auth, appId, crasUnidades, tiposAtendimento, atendentes
   const [loadingFila, setLoadingFila] = useState(false);
   const [loadingAtual, setLoadingAtual] = useState(false);
   const [observacoes, setObservacoes] = useState("");
+  const [callsSincePriority, setCallsSincePriority] = useState(0);
   const collectionPath = `artifacts/${appId}/public/data/atendimentos`;
 
   useEffect(() => {
@@ -923,7 +939,21 @@ const Atendente = ({ db, auth, appId, crasUnidades, tiposAtendimento, atendentes
 
   const handleChamarProximo = async () => {
     if (!db || !selectedAtendente || filaAguardando.length === 0 || atendimentoAtual) return;
-    const proximo = filaAguardando[0];
+    const prioridadeFila = filaAguardando.filter(i => (i.cidadao?.prioridade && i.cidadao.prioridade !== 'Nenhuma'));
+    const normalFila = filaAguardando.filter(i => (!i.cidadao?.prioridade || i.cidadao.prioridade === 'Nenhuma'));
+    let proximo = null;
+    if (callsSincePriority >= 3 && prioridadeFila.length > 0) {
+      proximo = prioridadeFila[0];
+      setCallsSincePriority(0);
+    } else if (normalFila.length > 0) {
+      proximo = normalFila[0];
+      setCallsSincePriority(c => c + 1);
+    } else if (prioridadeFila.length > 0) {
+      proximo = prioridadeFila[0];
+      setCallsSincePriority(0);
+    } else {
+      return;
+    }
 
     try {
       const docRef = doc(db, collectionPath, proximo.id);
@@ -1057,12 +1087,12 @@ const Dashboard = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList }
   useEffect(() => {
     if (!db) return;
     setLoading(true);
-    const q = query(collection(db, collectionPath), where("hora_chegada", ">=", Timestamp.fromDate(getStartOfToday())));
+    const q = query(collection(db, collectionPath), where("hora_chegada", ">=", Timestamp.fromDate(getStartOfToday())), limit(500));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const dataList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setAllAtendimentos(dataList);
       setLoading(false);
-    }, (err) => { setLoading(false); console.error("Erro ao carregar dashboard:", err); });
+    }, () => setLoading(false));
     return () => unsubscribe();
   }, [db, appId, collectionPath]);
 
@@ -1071,35 +1101,162 @@ const Dashboard = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList }
     const finalizados = allAtendimentos.filter(a => a.status === 'finalizado');
     const emAtendimento = allAtendimentos.filter(a => a.status === 'em_atendimento');
     const aguardando = allAtendimentos.filter(a => a.status === 'aguardando');
-
     let tempoMedio = 0;
     if (finalizados.length > 0) {
       const duracoes = finalizados.map(a => {
         if (a.hora_inicio && a.hora_fim) {
           const start = a.hora_inicio.toDate();
           const end = a.hora_fim.toDate();
-          // Calcula a duração em minutos, mínimo de 1 minuto
           return Math.max(1, Math.round((end.getTime() - start.getTime()) / (1000 * 60)));
         }
         return 0;
       });
       tempoMedio = Math.round(duracoes.reduce((acc, v) => acc + v, 0) / finalizados.length);
     }
-
     return { total, finalizados: finalizados.length, emAtendimento: emAtendimento.length, aguardando: aguardando.length, tempoMedio };
   }, [allAtendimentos]);
+
+  const porCras = useMemo(() => {
+    const map = new Map();
+    allAtendimentos.forEach(a => {
+      const nome = crasUnidades.find(c => c.id === a.cras_id)?.nome || 'CRAS';
+      const m = map.get(nome) || { cras: nome, aguardando: 0, finalizados: 0, total: 0 };
+      m.total += 1;
+      if (a.status === 'aguardando') m.aguardando += 1;
+      if (a.status === 'finalizado') m.finalizados += 1;
+      map.set(nome, m);
+    });
+    return Array.from(map.values()).filter(x => x.total > 0);
+  }, [allAtendimentos, crasUnidades]);
+
+  const tempoMedioPorCras = useMemo(() => {
+    const map = new Map();
+    allAtendimentos.forEach(a => {
+      if (a.status === 'finalizado' && a.hora_inicio && a.hora_fim) {
+        const nome = crasUnidades.find(c => c.id === a.cras_id)?.nome || 'CRAS';
+        const m = map.get(nome) || { cras: nome, soma: 0, qnt: 0 };
+        const start = a.hora_inicio.toDate();
+        const end = a.hora_fim.toDate();
+        m.soma += Math.max(1, Math.round((end.getTime() - start.getTime()) / (1000 * 60)));
+        m.qnt += 1;
+        map.set(nome, m);
+      }
+    });
+    return Array.from(map.values()).map(m => ({ cras: m.cras, tempo: Math.round(m.soma / Math.max(1, m.qnt)), quantidade: m.qnt })).sort((a,b) => b.tempo - a.tempo);
+  }, [allAtendimentos, crasUnidades]);
+
+  const ativosHoje = useMemo(() => allAtendimentos.filter(a => ['em_atendimento','chamando'].includes(a.status)), [allAtendimentos]);
+  const calcDecorrido = (a) => { if (!a.hora_inicio || !a.hora_inicio.toDate) return '0 min'; const start = a.hora_inicio.toDate(); const now = new Date(); const diff = Math.round((now.getTime() - start.getTime())/(1000*60)); return `${diff} min`; };
+
+  const StatsCard = ({ title, value, color }) => (
+    <div className="bg-white p-6 rounded-lg shadow flex items-center">
+      <div className="h-12 w-12 rounded-full mr-4" style={{ backgroundColor: color }}></div>
+      <div>
+        <div className="text-sm text-gray-600">{title}</div>
+        <div className="text-4xl font-bold">{value}</div>
+      </div>
+    </div>
+  );
+
+  const GraficoPorCRAS = ({ data }) => {
+    const canvasRef = React.useRef(null);
+    useEffect(() => {
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx || !window.Chart) return;
+      const labels = data.map(d => d.cras);
+      const datasetFinal = data.map(d => d.finalizados);
+      const datasetAguard = data.map(d => d.aguardando);
+      const chart = new window.Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            { label: 'Finalizados', data: datasetFinal, backgroundColor: '#43A047' },
+            { label: 'Aguardando', data: datasetAguard, backgroundColor: '#FB8C00' }
+          ]
+        },
+        options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: false }, y: { beginAtZero: true } } }
+      });
+      return () => { chart.destroy(); };
+    }, [data]);
+    return <div style={{ height: 300 }}><canvas ref={canvasRef} /></div>;
+  };
 
   return (
     <div className="p-6">
       <h2 className="text-3xl font-bold text-gray-800 mb-6">Dashboard</h2>
-      {loading ? (<div className="h-64 flex items-center justify-center"><Loader className="animate-spin h-12 w-12" /></div>) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <div className="bg-white p-6 rounded-lg shadow"><h3 className="text-sm font-medium text-gray-600">Total de Atendimentos</h3><p className="text-3xl font-bold">{stats.total}</p></div>
-          <div className="bg-white p-6 rounded-lg shadow"><h3 className="text-sm font-medium text-gray-600">Finalizados</h3><p className="text-3xl font-bold">{stats.finalizados}</p></div>
-          <div className="bg-white p-6 rounded-lg shadow"><h3 className="text-sm font-medium text-gray-600">Em Atendimento</h3><p className="text-3xl font-bold">{stats.emAtendimento}</p></div>
-          <div className="bg-white p-6 rounded-lg shadow"><h3 className="text-sm font-medium text-gray-600">Aguardando</h3><p className="text-3xl font-bold">{stats.aguardando}</p></div>
-          <div className="bg-white p-6 rounded-lg shadow md:col-span-2"><h3 className="text-sm font-medium text-gray-600">Tempo Médio (min)</h3><p className="text-3xl font-bold">{stats.tempoMedio}</p></div>
-        </div>
+      {loading ? (
+        <div className="h-64 flex items-center justify-center"><Loader className="animate-spin h-12 w-12" /></div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+            <StatsCard title="Total hoje" value={stats.total} color="#1E88E5" />
+            <StatsCard title="Finalizados hoje" value={stats.finalizados} color="#43A047" />
+            <StatsCard title="Em atendimento" value={stats.emAtendimento} color="#FB8C00" />
+            <StatsCard title="Tempo médio (min)" value={stats.tempoMedio} color="#8E24AA" />
+          </div>
+
+          <div className="grid grid-cols-3 gap-6 mb-6">
+            <div className="col-span-2 bg-white rounded-lg shadow p-4">
+              <GraficoPorCRAS data={porCras} />
+            </div>
+            <div className="bg-white rounded-lg shadow p-4">
+              <h3 className="text-lg font-semibold mb-3">Tempo médio por CRAS</h3>
+              <ul className="space-y-2">
+                {tempoMedioPorCras.map(item => (
+                  <li key={item.cras} className="flex justify-between"><span className="font-medium text-gray-700">{item.cras}</span><span className="text-gray-900 font-semibold">{item.tempo} min</span></li>
+                ))}
+                {tempoMedioPorCras.length === 0 && (<li className="text-gray-500">Sem dados</li>)}
+              </ul>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-4 mb-6">
+            <h3 className="text-lg font-semibold mb-3">Atendimentos por CRAS (Hoje)</h3>
+            <table className="w-full">
+              <thead>
+                <tr className="text-left text-sm text-gray-600">
+                  <th className="py-2">CRAS</th>
+                  <th className="py-2">Finalizados</th>
+                  <th className="py-2">Aguardando</th>
+                  <th className="py-2">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {porCras.map(row => (
+                  <tr key={row.cras} className="border-t">
+                    <td className="py-2 font-medium">{row.cras}</td>
+                    <td className="py-2 text-green-700 font-semibold">{row.finalizados}</td>
+                    <td className="py-2 text-orange-700 font-semibold">{row.aguardando}</td>
+                    <td className="py-2">{row.total}</td>
+                  </tr>
+                ))}
+                {porCras.length === 0 && (
+                  <tr><td className="py-2 text-gray-500" colSpan="4">Sem dados hoje</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-4">
+            <h3 className="text-lg font-semibold mb-4">Atendimentos de hoje</h3>
+            {ativosHoje.length === 0 ? (
+              <div className="text-gray-500">Nenhum ativo</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {ativosHoje.map(a => (
+                  <div key={a.id} className="border rounded-lg p-4">
+                    <div className="flex justify-between mb-2"><span className="text-xl font-bold">{a.senha}</span><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${a.status === 'em_atendimento' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}`}>{a.status}</span></div>
+                    <div className="font-semibold">{a.cidadao?.nome}</div>
+                    <div className="text-sm text-gray-600">{crasUnidades.find(c => c.id === a.cras_id)?.nome || ''}</div>
+                    <div className="text-sm text-gray-700">Guichê {atendentesList.find(x => x.id === a.atendente_id)?.guiche || '-'}</div>
+                    <div className="text-sm text-gray-700">{calcDecorrido(a)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
@@ -1597,9 +1754,9 @@ function App() {
     }
   };
 
-  // PainelTV usa layout quando usuário está logado, caso contrário, renderiza direto
+  // PainelTV SEM layout lateral (sem sidebar/header), sempre renderiza direto
   if (page === 'PainelTV') {
-    return user ? <Layout currentPage={page} setPage={setPage} user={user} userProfile={userProfile} auth={auth}>{renderPage()}</Layout> : renderPage();
+    return renderPage();
   }
 
   // O restante do app usa o Layout
