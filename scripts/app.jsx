@@ -1587,9 +1587,9 @@ function App() {
     }
   };
 
-  // PainelTV usa layout quando usuário está logado, caso contrário, renderiza direto
+  // PainelTV SEM layout (sem menu lateral)
   if (page === 'PainelTV') {
-    return user ? <Layout currentPage={page} setPage={setPage} user={user} userProfile={userProfile} auth={auth}>{renderPage()}</Layout> : renderPage();
+    return renderPage();
   }
 
   // O restante do app usa o Layout
