@@ -1265,7 +1265,7 @@ const Dashboard = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList }
   );
 };
 
-const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) => {
+const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile, atendentesList }) => {
   const [filters, setFilters] = useState({ dataInicio: '', dataFim: '', cras_id: 'todos', tipo_atendimento_id: 'todos', status: 'todos' });
   const [reportData, setReportData] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1282,6 +1282,50 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
 
   const getTipoNome = (id) => tiposAtendimento.find(t => t.id === id)?.nome || 'N/A';
   const getCrasNome = (id) => crasUnidades.find(c => c.id === id)?.nome || 'N/A';
+  const getAtendenteNome = (id) => atendentesList?.find(a => a.id === id)?.nome || '';
+  const getAtendenteGuiche = (id) => atendentesList?.find(a => a.id === id)?.guiche || '';
+  const calcEsperaMin = (item) => {
+    const s = item.hora_chegada?.toDate?.();
+    const e = item.hora_chamada?.toDate?.() || item.hora_inicio?.toDate?.();
+    if (!s || !e) return '';
+    return String(Math.max(0, Math.round((e.getTime() - s.getTime())/(1000*60))));
+  };
+  const calcAtendimentoMin = (item) => {
+    const s = item.hora_inicio?.toDate?.();
+    const e = item.hora_fim?.toDate?.();
+    if (!s || !e) return '';
+    return String(Math.max(1, Math.round((e.getTime() - s.getTime())/(1000*60))));
+  };
+
+  const kpis = useMemo(() => {
+    const total = reportData.length;
+    const finalizados = reportData.filter(i => i.status === 'finalizado');
+    const emAtendimento = reportData.filter(i => i.status === 'em_atendimento');
+    const aguardando = reportData.filter(i => i.status === 'aguardando');
+    const mediaAtendimento = (() => {
+      const vals = finalizados.map(i => {
+        const s = i.hora_inicio?.toDate?.();
+        const e = i.hora_fim?.toDate?.();
+        if (!s || !e) return 0;
+        return Math.max(1, Math.round((e.getTime() - s.getTime())/(1000*60)));
+      });
+      const sum = vals.reduce((a,b) => a + b, 0);
+      const count = vals.filter(v => v > 0).length;
+      return count ? Math.round(sum / count) : 0;
+    })();
+    const mediaEspera = (() => {
+      const vals = reportData.map(i => {
+        const s = i.hora_chegada?.toDate?.();
+        const e = i.hora_chamada?.toDate?.() || i.hora_inicio?.toDate?.();
+        if (!s || !e) return 0;
+        return Math.max(0, Math.round((e.getTime() - s.getTime())/(1000*60)));
+      });
+      const sum = vals.reduce((a,b) => a + b, 0);
+      const count = vals.filter(v => v > 0).length;
+      return count ? Math.round(sum / count) : 0;
+    })();
+    return { total, finalizados: finalizados.length, emAtendimento: emAtendimento.length, aguardando: aguardando.length, mediaAtendimento, mediaEspera };
+  }, [reportData]);
 
   const handleSearch = async () => {
     setLoading(true);
@@ -1326,9 +1370,10 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
 
   const handleExportCSV = () => {
     if (reportData.length === 0) return;
-    const headers = ["ID", "DataHoraChegada", "Senha", "NomeCidadao", "CPFCidadao", "Sexo", "CRAS", "TipoAtendimento", "Status", "TempoAtendimentoMin", "Observacoes"];
+    const headers = ["ID", "DataHoraChegada", "Senha", "NomeCidadao", "CPFCidadao", "Sexo", "CRAS", "TipoAtendimento", "Status", "TempoEsperaMin", "TempoAtendimentoMin", "Atendente", "Guiche", "Prioridade", "Observacoes"];
     const rows = reportData.map(item => {
-      const duration = calculateDuration(item.hora_inicio, item.hora_fim).replace(' min', '');
+      const esperaMin = calcEsperaMin(item);
+      const atendimentoMin = calcAtendimentoMin(item);
       const data = [
         item.id,
         formatDateTime(item.hora_chegada),
@@ -1339,7 +1384,11 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
         getCrasNome(item.cras_id),
         getTipoNome(item.tipo_atendimento_id),
         item.status,
-        duration.includes('-') ? '' : duration, // Só exporta a duração se for um número válido
+        esperaMin,
+        atendimentoMin,
+        getAtendenteNome(item.atendente_id || ''),
+        getAtendenteGuiche(item.atendente_id || ''),
+        item.cidadao?.prioridade || '',
         (item.observacoes || '').replace(/"/g, '""')
       ];
       return `"${data.join('","')}"`;
@@ -1356,13 +1405,26 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
     document.body.removeChild(link);
   };
 
-  const GraficoPorTipo = () => {
-    const counts = useMemo(() => {
+  const ChartPorTipo = () => {
+    const canvasRef = React.useRef(null);
+    const data = useMemo(() => {
       const map = new Map();
       reportData.forEach(item => { const nome = getTipoNome(item.tipo_atendimento_id); map.set(nome, (map.get(nome) || 0) + 1); });
       return Array.from(map.entries());
     }, [reportData]);
-    return (<div className="bg-white p-6 rounded-lg shadow"><h4 className="text-lg font-semibold mb-4">Por Tipo de Atendimento</h4><ul className="space-y-2">{counts.map(([nome, total]) => (<li key={nome} className="flex justify-between"><span className="font-medium">{nome}</span><span>{total}</span></li>))}</ul></div>);
+    useEffect(() => {
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx || !window.Chart) return;
+      const labels = data.map(([nome]) => nome);
+      const values = data.map(([, total]) => total);
+      const chart = new window.Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets: [{ label: 'Atendimentos', data: values, backgroundColor: '#1E88E5' }] },
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
+      });
+      return () => { chart.destroy(); };
+    }, [data]);
+    return <div className="bg-white p-6 rounded-lg shadow" style={{ height: 300 }}><h4 className="text-lg font-semibold mb-4">Por Tipo de Atendimento</h4><canvas ref={canvasRef} /></div>;
   };
 
   const GraficoPorSexo = () => {
@@ -1377,7 +1439,7 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
   const TabelaRelatorio = () => {
     return (
       <div className="bg-white p-6 rounded-lg shadow mt-6 overflow-x-auto">
-        <table className="min-w-[900px] w-full">
+        <table className="min-w-[1200px] w-full">
           <thead>
             <tr className="bg-gray-50">
               <th className="p-2 text-left text-sm font-semibold text-gray-600">ID</th>
@@ -1388,7 +1450,11 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
               <th className="p-2 text-left text-sm font-semibold text-gray-600">CRAS</th>
               <th className="p-2 text-left text-sm font-semibold text-gray-600">Tipo</th>
               <th className="p-2 text-left text-sm font-semibold text-gray-600">Status</th>
-              <th className="p-2 text-left text-sm font-semibold text-gray-600">Tempo (min)</th>
+              <th className="p-2 text-left text-sm font-semibold text-gray-600">Espera (min)</th>
+              <th className="p-2 text-left text-sm font-semibold text-gray-600">Atendimento (min)</th>
+              <th className="p-2 text-left text-sm font-semibold text-gray-600">Atendente</th>
+              <th className="p-2 text-left text-sm font-semibold text-gray-600">Guichê</th>
+              <th className="p-2 text-left text-sm font-semibold text-gray-600">Prioridade</th>
               <th className="p-2 text-left text-sm font-semibold text-gray-600">Obs</th>
             </tr>
           </thead>
@@ -1403,7 +1469,11 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
                 <td className="p-2">{getCrasNome(item.cras_id)}</td>
                 <td className="p-2">{getTipoNome(item.tipo_atendimento_id)}</td>
                 <td className="p-2">{item.status}</td>
-                <td className="p-2">{calculateDuration(item.hora_inicio, item.hora_fim).replace(' min', '')}</td>
+                <td className="p-2">{calcEsperaMin(item)}</td>
+                <td className="p-2">{calcAtendimentoMin(item)}</td>
+                <td className="p-2">{getAtendenteNome(item.atendente_id || '')}</td>
+                <td className="p-2">{getAtendenteGuiche(item.atendente_id || '')}</td>
+                <td className="p-2">{item.cidadao?.prioridade || ''}</td>
                 <td className="p-2">{item.observacoes}</td>
               </tr>
             ))}
@@ -1449,8 +1519,16 @@ const Relatorios = ({ db, appId, crasUnidades, tiposAtendimento, userProfile }) 
 
       {loading ? (<div className="flex items-center justify-center p-20"><Loader className="animate-spin h-12 w-12 text-blue-600" /></div>) : reportData.length === 0 ? (<p className="text-gray-500 text-center p-20">Nenhum dado encontrado para os filtros selecionados.</p>) : (
         <>
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 mt-6">
+            <div className="col-span-1 md:col-span-1 lg:col-span-1"><div className="bg-white p-4 rounded-lg shadow"><div className="text-sm text-gray-600">Total</div><div className="text-3xl font-bold" style={{ color: '#1E88E5' }}>{kpis.total}</div></div></div>
+            <div className="col-span-1 md:col-span-1 lg:col-span-1"><div className="bg-white p-4 rounded-lg shadow"><div className="text-sm text-gray-600">Finalizados</div><div className="text-3xl font-bold" style={{ color: '#43A047' }}>{kpis.finalizados}</div></div></div>
+            <div className="col-span-1 md:col-span-1 lg:col-span-1"><div className="bg-white p-4 rounded-lg shadow"><div className="text-sm text-gray-600">Em atendimento</div><div className="text-3xl font-bold" style={{ color: '#FB8C00' }}>{kpis.emAtendimento}</div></div></div>
+            <div className="col-span-1 md:col-span-1 lg:col-span-1"><div className="bg-white p-4 rounded-lg shadow"><div className="text-sm text-gray-600">Aguardando</div><div className="text-3xl font-bold" style={{ color: '#E53935' }}>{kpis.aguardando}</div></div></div>
+            <div className="col-span-1 md:col-span-1 lg:col-span-1"><div className="bg-white p-4 rounded-lg shadow"><div className="text-sm text-gray-600">Média atendimento (min)</div><div className="text-3xl font-bold" style={{ color: '#8E24AA' }}>{kpis.mediaAtendimento}</div></div></div>
+            <div className="col-span-1 md:col-span-1 lg:col-span-1"><div className="bg-white p-4 rounded-lg shadow"><div className="text-sm text-gray-600">Média espera (min)</div><div className="text-3xl font-bold" style={{ color: '#00ACC1' }}>{kpis.mediaEspera}</div></div></div>
+          </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-            <GraficoPorTipo />
+            <ChartPorTipo />
             <GraficoPorSexo />
           </div>
           <TabelaRelatorio />
