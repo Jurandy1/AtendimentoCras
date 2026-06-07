@@ -1,0 +1,233 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cidadao.cpf",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cidadao.cpf",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "tipo_atendimento_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "tipo_atendimento_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "tipo_atendimento_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "tipo_atendimento_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chegada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_chamada",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cras_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "cidadao.cpf",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cidadao.cpf",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_fim",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "atendimentos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "atendente_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "hora_fim",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

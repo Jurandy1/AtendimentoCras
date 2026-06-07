@@ -1,0 +1,238 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+ 
+     // Função auxiliar para verificar se o usuário está logado 
+     function isAuthenticated() { 
+       return request.auth != null; 
+     } 
+ 
+    // Busca os dados do perfil do usuário na coleção 'users' ou 'atendentes'
+    // Usa exists() antes de get() para evitar erro ao acessar .data em documento inexistente
+    function getUserData(appId) { 
+      let uPath = /databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid);
+      let aPath = /databases/$(database)/documents/artifacts/$(appId)/public/data/atendentes/$(request.auth.uid);
+
+      return exists(uPath) && get(uPath).data != null
+        ? get(uPath).data
+        : (exists(aPath) && get(aPath).data != null 
+          ? get(aPath).data 
+          : (request.auth.token.email != null 
+              && exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/users_by_email/$(request.auth.token.email.lower()))
+            ? get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users_by_email/$(request.auth.token.email.lower())).data
+            : null));
+    } 
+
+    function getUserRole(appId) {
+      let data = getUserData(appId);
+      return data != null
+        ? (
+            // Prioriza roleNorm (normalizado) para evitar casos como "Coordenação"
+            // que não batem com os verificadores de papel.
+            data.roleNorm != null
+              ? data.roleNorm
+              : (
+                  data.role != null
+                    ? data.role
+                    : (
+                        data.cargo != null
+                          ? data.cargo
+                          : (data.tipo != null ? data.tipo : null)
+                      )
+                )
+          )
+        : null;
+    }
+ 
+     // Verificadores de papel (Role) 
+    function isSuperintendente(appId) { 
+      let role = getUserRole(appId);
+      return isAuthenticated() && role != null && 
+        (role.lower() == 'superintendente' || role.lower() == 'admin' || role.lower() == 'master' || role.lower() == 'super_admin' ||
+         role.lower().matches('.*superintendente.*') || role.lower().matches('.*admin.*') || role.lower().matches('.*master.*')); 
+    } 
+
+    function isCoordenador(appId) { 
+      let role = getUserRole(appId);
+      return isAuthenticated() && role != null && 
+        (role.lower() == 'coordenador' || role.lower() == 'coordenadora' ||
+         role.lower().matches('.*coordenador.*') || role.lower().matches('.*coordena.*') || role.lower().matches('.*gestor.*')); 
+    } 
+
+    // Inclui atendente, atendente padrão, recepcionista, psicólogo e outros técnicos
+    function isAtendente(appId) { 
+      let role = getUserRole(appId); 
+      return isAuthenticated() && role != null &&
+        (role.lower() == 'atendente' || 
+         role.lower() == 'atendente padrão' || 
+         role.lower() == 'atendente padrao' || 
+         role.lower() == 'recepcionista' ||
+         role.lower().matches('.*recep.*') ||
+         role.lower() == 'psicólogo' ||
+         role.lower() == 'psicologo' ||
+         role.lower() == 'psicólogo(a)' ||
+         role.lower() == 'psicologo(a)' ||
+         role.lower() == 'assistente social' ||
+         role.lower().matches('.*psic.*') ||
+         role.lower().matches('.*técnico.*') ||
+         role.lower().matches('.*tecnico.*') ||
+         role.lower().matches('.*assistente.*') ||
+         role.lower().matches('.*social.*') ||
+         role.lower().matches('.*cadastrador.*') ||
+         role.lower().matches('.*entrevistador.*') ||
+         role.lower().matches('.*visitador.*') ||
+         role.lower().matches('.*cadunico.*') ||
+         role.lower().matches('.*cadúnico.*')); 
+    } 
+ 
+     // 1. PERFIL DE USUÁRIO 
+     match /artifacts/{appId}/public/data/users/{userId} { 
+       allow read: if isAuthenticated(); 
+       allow write: if isAuthenticated() && 
+         (request.auth.uid == userId || isSuperintendente(appId) || isCoordenador(appId)); 
+     } 
+ 
+     match /artifacts/{appId}/public/data/users_by_email/{email} { 
+       allow read: if isAuthenticated(); 
+       allow write: if isAuthenticated() && 
+         (request.auth.token.email.lower() == email || isSuperintendente(appId) || isCoordenador(appId)); 
+     } 
+ 
+     match /artifacts/{appId}/public/data/users_whitelist/{email} { 
+       allow read: if isAuthenticated(); 
+       allow write: if isSuperintendente(appId) || isCoordenador(appId); 
+     } 
+ 
+     // 2. ATENDENTES
+    match /artifacts/{appId}/public/data/atendentes/{docId} {
+      // Leitura requer autenticação (inclui login anônimo do Painel TV)
+      allow read: if isAuthenticated();
+
+      // Criação:
+      // - Admin/Coord
+      // - O próprio usuário (para criar seu perfil com ID = UID)
+      allow create: if isSuperintendente(appId) || isCoordenador(appId) || 
+        (isAuthenticated() && request.auth.uid == docId);
+
+      // Exclusão:
+      // - Admin/Coord
+      // - O próprio usuário deletando seu perfil antigo (fantasma) - verificação por email
+      allow delete: if isSuperintendente(appId) || isCoordenador(appId) || 
+        (isAuthenticated() && resource.data.email == request.auth.token.email);
+
+      // Atualização:
+      // - Admin/Coord
+      // - O próprio usuário atualizando seu perfil (ID = UID)
+      // - O próprio usuário quando o doc tem o campo uid igual ao UID autenticado
+      // - O próprio usuário atualizando seu perfil fantasma (antes da migração) - verificação por email
+      // REMOVIDO isAtendente(appId) geral para evitar edição cruzada
+      allow update: if 
+        isSuperintendente(appId) || 
+        isCoordenador(appId)   || 
+        (isAuthenticated() && request.auth.uid == docId) ||
+        (isAuthenticated() && resource.data.uid != null && resource.data.uid == request.auth.uid) ||
+        ( 
+          isAuthenticated() && 
+          request.auth.token.email != null && 
+          resource.data.email != null && 
+          resource.data.email.lower() == request.auth.token.email.lower() 
+        ); 
+    } 
+ 
+     // 3. ATENDIMENTOS 
+     match /artifacts/{appId}/public/data/atendimentos/{document=**} { 
+       // Leitura requer autenticação (inclui login anônimo do Painel TV)
+       allow read: if isAuthenticated(); 
+ 
+       // Escrita restrita a perfis operacionais
+       allow create: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId); 
+      allow update: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId); 
+
+      // Exclusão apenas para superintendente/coordenador 
+      allow delete: if isSuperintendente(appId) || isCoordenador(appId); 
+     } 
+ 
+     // ABORDAGEM SOCIAL (Novo Módulo)
+     match /artifacts/{appId}/public/data/abordagens_social/{document=**} {
+       allow read: if isAuthenticated();
+       // Psicólogos (atendentes) criam. Admins podem limpar.
+       allow create: if isAuthenticated();
+       allow update: if isAuthenticated();
+       allow delete: if isSuperintendente(appId) || isCoordenador(appId);
+     }
+ 
+     // 4. CONFIGURAÇÕES E OUTROS 
+     match /artifacts/{appId}/public/data/cras_unidades/{document=**} { 
+       allow read: if isAuthenticated(); 
+       allow write: if isSuperintendente(appId) || isCoordenador(appId); 
+     } 
+ 
+     match /artifacts/{appId}/public/data/cargos/{document=**} { 
+       allow read: if isAuthenticated(); 
+       allow write: if isSuperintendente(appId) || isCoordenador(appId); 
+     } 
+ 
+     match /artifacts/{appId}/public/data/atendente_cargos/{document=**} { 
+      allow read: if isAuthenticated(); 
+      allow write: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId); 
+    } 
+
+    match /artifacts/{appId}/public/data/encaminhamentos_opcoes/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId);
+    }
+
+    match /artifacts/{appId}/public/data/servicos_dia_registros/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId);
+    }
+ 
+     match /artifacts/{appId}/public/data/tipos_atendimento/{document=**} { 
+       allow read: if isAuthenticated(); 
+       allow write: if isSuperintendente(appId) || isCoordenador(appId); 
+     } 
+ 
+     match /artifacts/{appId}/public/data/atendente_salas/{document=**} { 
+       allow read: if isAuthenticated(); 
+       allow write: if isAtendente(appId) || isCoordenador(appId) || isSuperintendente(appId); 
+     } 
+ 
+     // 5. CIDADÃOS (IMPORTAÇÃO EM MASSA E RECEPÇÃO) 
+     match /artifacts/{appId}/public/data/cidadaos/{document=**} { 
+       allow read: if isAuthenticated(); 
+       // Super, Coordenador e quem tem perfil de atendente/recepção podem escrever 
+       allow write: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId); 
+     } 
+ 
+    // 6. USUÁRIOS BLOQUEADOS / DESLIGADOS
+    match /artifacts/{appId}/public/data/usuarios_bloqueados/{document=**} { 
+      // Recepção/atendentes precisam ler para bloquear na tela 
+      allow read: if isAuthenticated(); 
+
+     // Superintendente, coordenador e atendentes (inclui psicólogos) podem criar/alterar/excluir desligados
+     allow write: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId); 
+    }
+
+    // 7. AUDIT LOGS
+    match /artifacts/{appId}/public/data/audit_logs/{document=**} {
+      allow read: if isAuthenticated(); // Temporariamente liberado para qualquer logado
+     // Coordenador, Superintendente E Atendentes (Recepcionistas) precisam criar log para justificar cancelamentos
+     allow create: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId); 
+     allow delete: if isSuperintendente(appId) || isCoordenador(appId);
+    }
+
+    // 8. ORIGENS DEMANDA
+    match /artifacts/{appId}/public/data/origens_demanda/{document=**} {
+      allow read: if isAuthenticated();
+     allow write: if isSuperintendente(appId) || isCoordenador(appId);
+    }
+
+    // 9. CHAT INTERNO
+    match /artifacts/{appId}/public/data/chat_interno/{document=**} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      // Não permitimos edição/exclusão por enquanto para manter histórico íntegro
+    }
+  } 
+}

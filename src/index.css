@@ -1,0 +1,64 @@
+@import "./css/preflight.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Padrão GOV.BR - Variáveis de design */
+:root {
+  --govbr-azul: #1351B4;
+  --govbr-azul-escuro: #0D47A1;
+  --govbr-azul-hover: #104191;
+  --govbr-fundo: #F5F5F5;
+  --govbr-borda: #E0E0E0;
+  --govbr-texto: #1F2937;
+  --govbr-texto-secundario: #6B7280;
+}
+
+body {
+  font-family: 'Raleway', system-ui, -apple-system, sans-serif;
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Scrollbar estilizado - Padrão GOV.BR */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thumb-white\/20::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+  }
+  .scrollbar-thumb-white\/20::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+  .scrollbar-thumb-govbr-borda::-webkit-scrollbar-thumb {
+    background: var(--govbr-borda);
+    border-radius: 4px;
+  }
+  .scrollbar-thumb-govbr-borda::-webkit-scrollbar-thumb:hover {
+    background: #c5c5c5;
+  }
+  .scrollbar-track-transparent::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+  }
+  
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}

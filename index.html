@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <title>Sistema - Centro Pop</title>
+    <style>
+      body { margin: 0; padding: 0; background-color: #F5F5F5; font-family: 'Raleway', system-ui, sans-serif; }
+      #root-loader {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, -apple-system, sans-serif;
+        z-index: 9999;
+        background-color: #F5F5F5;
+      }
+      .loader-spinner {
+        width: 48px;
+        height: 48px;
+        border: 5px solid #e5e7eb;
+        border-top-color: #1351B4;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin-bottom: 16px;
+      }
+      .loader-text {
+        color: #1351B4;
+        font-weight: 600;
+        font-size: 1.125rem;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+    <script type="module" src="/src/main.jsx"></script>
+  </head>
+  <body>
+    <div id="root">
+      <div id="root-loader">
+        <div class="loader-spinner"></div>
+        <div class="loader-text">Carregando Sistema...</div>
+      </div>
+    </div>
+  </body>
+</html>

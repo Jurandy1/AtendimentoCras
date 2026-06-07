@@ -1,0 +1,18 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Fotos de cidadãos: leitura e escrita para usuários autenticados
+    // Limite de 5MB por arquivo, apenas imagens
+    match /artifacts/{appId}/public/images/cidadaos/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Qualquer outro caminho dentro de artifacts: somente leitura para autenticados
+    match /artifacts/{appId}/{allPaths=**} {
+      allow read: if request.auth != null;
+    }
+  }
+}
