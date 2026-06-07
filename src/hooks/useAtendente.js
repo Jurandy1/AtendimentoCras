@@ -1019,7 +1019,10 @@ export const useAtendente = ({
           setFilaAguardando(rebuildFila(currentBaseFila));
           setLoadingFila(false);
         },
-        () => {}
+        (error) => {
+          if (!mounted.current) return;
+          console.warn(`[Fila] Erro no listener preferencial (${key}):`, error);
+        }
       );
       prefUnsubs.push(unsub);
     });

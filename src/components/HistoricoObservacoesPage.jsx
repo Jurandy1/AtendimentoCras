@@ -138,13 +138,13 @@ const HistoricoObservacoesPage = ({
       try {
         let qFallback;
         if (isCoordenador) {
-          qFallback = query(atendimentosRef);
+          qFallback = query(atendimentosRef, limit(300));
         } else {
           if (!atendenteId) {
             if (active) setLoading(false);
             return;
           }
-          qFallback = query(atendimentosRef, where('atendente_id', '==', atendenteId));
+          qFallback = query(atendimentosRef, where('atendente_id', '==', atendenteId), limit(300));
         }
         const snapshot = await getDocs(qFallback);
         const dados = snapshot.docs

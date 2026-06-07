@@ -1,8 +1,41 @@
 const MAX_CHARS = 200;
 
+const resolveCorsOrigin = (req) => {
+  const origin = req.headers.origin || req.headers.referer || "";
+  if (!origin) return null;
+
+  try {
+    const host = new URL(origin).hostname;
+    if (host === "localhost" || host === "127.0.0.1") return origin;
+    if (host.endsWith(".vercel.app")) return origin;
+    if (process.env.ALLOWED_TTS_HOST && host === process.env.ALLOWED_TTS_HOST) return origin;
+    if (process.env.VERCEL_URL && host === process.env.VERCEL_URL) return origin;
+  } catch (_) {}
+
+  return null;
+};
+
 export default async function handler(req, res) {
+  if (req.method === "OPTIONS") {
+    const allowedOrigin = resolveCorsOrigin(req);
+    if (allowedOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    }
+    return res.status(204).end();
+  }
+
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const allowedOrigin = resolveCorsOrigin(req);
+  const originHeader = req.headers.origin;
+
+  // Smart TVs e <audio src> direto costumam não enviar Origin — bloqueia só origem explícita inválida
+  if (originHeader && !allowedOrigin) {
+    return res.status(403).json({ error: "Origin not allowed" });
   }
 
   const text = String(req.query.q || req.query.text || "").trim();
@@ -29,7 +62,10 @@ export default async function handler(req, res) {
         const buffer = Buffer.from(await response.arrayBuffer());
         res.setHeader("Content-Type", "audio/mpeg");
         res.setHeader("Cache-Control", "public, max-age=86400");
-        res.setHeader("Access-Control-Allow-Origin", "*");
+        if (allowedOrigin) {
+          res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+          res.setHeader("Vary", "Origin");
+        }
         return res.status(200).send(buffer);
       }
       lastStatus = response.status;

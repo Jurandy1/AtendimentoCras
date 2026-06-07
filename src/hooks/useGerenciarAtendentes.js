@@ -271,7 +271,10 @@ export const useGerenciarAtendentes = ({
       }
 
       resetForm();
-    } catch (error) { console.error("Erro ao salvar Atendente:", error); }
+    } catch (error) {
+      console.error("Erro ao salvar Atendente:", error);
+      alert(getFriendlyFirebaseError(error, "Erro ao salvar atendente. Tente novamente."));
+    }
   };
 
   const handleEdit = (atendente) => {

@@ -209,10 +209,19 @@ const falarViaNativo = (texto) => {
 
     let falouAlgo = false;
     let keepAliveId = null;
+    let timeoutId = null;
     let inicioUtt = Date.now();
+
+    const limparTimeout = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
 
     utt.onstart = () => {
       falouAlgo = true;
+      limparTimeout();
       dlog(`[TTS-Nativo] Iniciado com voz: ${voz?.name || "padrão"}`);
       keepAliveId = setInterval(() => {
         if (window.speechSynthesis.speaking) {
@@ -227,6 +236,7 @@ const falarViaNativo = (texto) => {
     };
     
     utt.onend = () => {
+      limparTimeout();
       if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
       const duracao = Date.now() - inicioUtt;
       dlog(`[TTS-Nativo] Finalizado (${duracao}ms)`);
@@ -234,6 +244,7 @@ const falarViaNativo = (texto) => {
     };
     
     utt.onerror = (evt) => {
+      limparTimeout();
       if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
       const duracao = Date.now() - inicioUtt;
       dlog(`[TTS-Nativo] Erro após ${duracao}ms: ${evt.error}`);
@@ -244,8 +255,7 @@ const falarViaNativo = (texto) => {
     dlog(`[TTS-Nativo] Iniciando síntese...`);
     window.speechSynthesis.speak(utt);
 
-    // ✅ Timeout aumentado para Samsung (3s ao invés de 1.5s)
-    setTimeout(() => {
+    timeoutId = setTimeout(() => {
       if (!falouAlgo && !window.speechSynthesis.speaking) {
         try { window.speechSynthesis.cancel(); } catch (_) {}
         if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
@@ -515,6 +525,22 @@ function PainelTVPage({
 
   const lastChamadoRef = useRef({ id: null, ts: null });
   const pendingTimeoutsRef = useRef(new Set());
+  const somAtivoRef = useRef(somAtivo);
+
+  const cancelarAnunciosPendentes = () => {
+    pendingTimeoutsRef.current.forEach(clearTimeout);
+    pendingTimeoutsRef.current.clear();
+    try { window.speechSynthesis?.cancel(); } catch (_) {}
+  };
+
+  useEffect(() => {
+    somAtivoRef.current = somAtivo;
+  }, [somAtivo]);
+
+  useEffect(() => {
+    lastChamadoRef.current = { id: null, ts: null };
+    cancelarAnunciosPendentes();
+  }, [selectedCrasId]);
 
   // ── Ativa modo debug via ?debug=1 ────────────────────────────────
   useEffect(() => {
@@ -687,135 +713,204 @@ function PainelTVPage({
 
   useEffect(() => {
     if (!db || !selectedCrasId) return;
-    const q = query(
+
+    const mapDoc = (docSnap) => {
+      const data = docSnap.data() || {};
+      const cid = data.cidadao ? { ...data.cidadao } : {};
+      const nomeExiste =
+        (cid.nome && String(cid.nome).trim() !== "") ||
+        (cid.nomeSocial && String(cid.nomeSocial).trim() !== "");
+      if (!nomeExiste && data.nome_exibicao) cid.nome = data.nome_exibicao;
+      const nomeParaChamada = data.nome_chamada || data.senha || "";
+      return { id: docSnap.id, ...data, cidadao: cid, nome_chamada_final: nomeParaChamada };
+    };
+
+    const getMillis = (ts) => {
+      if (!ts) return 0;
+      if (typeof ts.toMillis === "function") return ts.toMillis();
+      if (ts instanceof Date) return ts.getTime();
+      if (typeof ts === "number") return ts;
+      return 0;
+    };
+
+    const deveIgnorarChamada = (registro) => {
+      if (!registro || registro.status === "cancelado") return true;
+      const tipo = tiposMap.get(registro.tipo_atendimento_id);
+      return (tipo?.nome || "").toLowerCase().includes("abordagem social");
+    };
+
+    const montarChamadoExibicao = (registro) => {
+      const tipo = tiposMap.get(registro.tipo_atendimento_id);
+      const atendente = atendentesMap.get(registro.atendente_id);
+      let localAtendimento = registro.atendente_guiche;
+      if (!localAtendimento) {
+        localAtendimento = atendente?.guiche || "Sala de atendimento";
+        if (atendente?.sala_atual_id) {
+          const sala = salasMap.get(atendente.sala_atual_id);
+          if (sala?.nome) localAtendimento = sala.nome;
+        }
+      }
+      return {
+        ...registro,
+        tipo_nome: tipo?.nome || "Atendimento",
+        tipo_cor: tipo?.cor || "#333",
+        atendente_nome: atendente?.nome || "Atendente",
+        atendente_guiche: localAtendimento,
+      };
+    };
+
+    const dispararAnuncio = (novoChamado, localAtendimento) => {
+      if (!somAtivoRef.current) {
+        dlog("[Chamada] Som inativo — exibindo na tela sem narração");
+        return;
+      }
+
+      const nomePrincipal = getNomeExibicao(novoChamado);
+      dlog(`[Chamada] ${nomePrincipal} → ${localAtendimento}`);
+
+      const tocar = async () => {
+        try {
+          playBeep();
+          const tid = setTimeout(async () => {
+            pendingTimeoutsRef.current.delete(tid);
+            setAnunciando(true);
+            try {
+              await anunciarChamada(novoChamado, nomePrincipal);
+            } finally {
+              setAnunciando(false);
+            }
+          }, 300);
+          pendingTimeoutsRef.current.add(tid);
+        } catch (e) {
+          dwarn("[Audio] Autoplay bloqueado: " + (e?.message || e));
+          setAutoplayBlocked(true);
+        }
+      };
+      tocar();
+    };
+
+    const chamadoAtualIdRef = { current: null };
+
+    const processarChamadaAtiva = (snapshot) => {
+      const candidatos = snapshot.docs
+        .map(mapDoc)
+        .filter((d) => !deveIgnorarChamada(d));
+
+      const chamandoAgora = candidatos.sort(
+        (a, b) =>
+          getMillis(b.hora_chamada) - getMillis(a.hora_chamada) ||
+          getMillis(b.hora_chegada) - getMillis(a.hora_chegada)
+      )[0];
+
+      if (!chamandoAgora) {
+        chamadoAtualIdRef.current = null;
+        setChamando(null);
+        return;
+      }
+
+      const novoChamado = montarChamadoExibicao(chamandoAgora);
+      const novoTs = getMillis(novoChamado.hora_chamada) || null;
+      const isNovoId = lastChamadoRef.current.id !== novoChamado.id;
+      const isRechamar =
+        !isNovoId &&
+        novoTs &&
+        lastChamadoRef.current.ts &&
+        novoTs !== lastChamadoRef.current.ts;
+
+      if (isNovoId || isRechamar) {
+        lastChamadoRef.current = {
+          id: novoChamado.id,
+          ts: novoTs ?? lastChamadoRef.current.ts,
+        };
+        cancelarAnunciosPendentes();
+        dispararAnuncio(novoChamado, novoChamado.atendente_guiche);
+      } else if (!lastChamadoRef.current.ts && novoTs) {
+        lastChamadoRef.current.ts = novoTs;
+      }
+
+      setChamando((prev) => {
+        if (prev?.id !== novoChamado.id) setHighlightKey((k) => k + 1);
+        return novoChamado;
+      });
+      chamadoAtualIdRef.current = novoChamado.id;
+    };
+
+    const processarHistorico = (snapshot) => {
+      setError(null);
+      const docs = snapshot.docs.map(mapDoc);
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
+
+      const docsHoje = docs.filter((d) => {
+        if (d.status === "cancelado") return false;
+        if (deveIgnorarChamada(d)) return false;
+        const hc = d.hora_chamada;
+        if (!hc || !hc.toDate) return d.status === "chamando";
+        return hc.toDate() >= now;
+      });
+
+      const historico = docsHoje
+        .filter((d) => d.id !== chamadoAtualIdRef.current)
+        .sort((a, b) => getMillis(b.hora_chamada) - getMillis(a.hora_chamada))
+        .slice(0, 5)
+        .map((it) => {
+          const exibicao = montarChamadoExibicao(it);
+          return {
+            ...it,
+            tipo_nome: exibicao.tipo_nome,
+            atendente_guiche: exibicao.atendente_guiche,
+          };
+        });
+      setUltimosChamados(historico);
+    };
+
+    const qChamando = query(
+      collection(db, collectionPath),
+      where("cras_id", "==", selectedCrasId),
+      where("status", "==", "chamando"),
+      limit(5)
+    );
+
+    const qHistorico = query(
       collection(db, collectionPath),
       where("cras_id", "==", selectedCrasId),
       orderBy("hora_chamada", "desc"),
       limit(20)
     );
-    let unsubscribeFallback = null;
 
-    const processSnapshot = (snapshot) => {
-      setError(null);
-      const docs = snapshot.docs.map((docSnap) => {
-        const data = docSnap.data() || {};
-        const cid = data.cidadao ? { ...data.cidadao } : {};
-        const nomeExiste = (cid.nome && String(cid.nome).trim() !== "") || (cid.nomeSocial && String(cid.nomeSocial).trim() !== "");
-        if (!nomeExiste && data.nome_exibicao) cid.nome = data.nome_exibicao;
-        const nomeParaChamada = data.nome_chamada || data.senha || "";
-        return { id: docSnap.id, ...data, cidadao: cid, nome_chamada_final: nomeParaChamada };
-      });
+    let unsubscribeHistoricoFallback = null;
 
-      const now = new Date();
-      now.setHours(0, 0, 0, 0);
-
-      const docsHoje = docs.filter((d) => {
-        const hc = d.hora_chamada;
-        if (!hc || !hc.toDate) return false;
-        if (hc.toDate() < now) return false;
-        if (d.status === "cancelado") return false;
-        const tipo = tiposMap.get(d.tipo_atendimento_id);
-        if ((tipo?.nome || "").toLowerCase().includes("abordagem social")) return false;
-        return true;
-      });
-
-      const chamandoAgora = docsHoje
-        .filter((d) => d.status === "chamando")
-        .sort((a, b) => (b.hora_chamada?.toMillis?.() ?? 0) - (a.hora_chamada?.toMillis?.() ?? 0))[0];
-
-      if (chamandoAgora) {
-        const tipo = tiposMap.get(chamandoAgora.tipo_atendimento_id);
-        const atendente = atendentesMap.get(chamandoAgora.atendente_id);
-        let localAtendimento = chamandoAgora.atendente_guiche;
-        if (!localAtendimento) {
-          localAtendimento = atendente?.guiche || "Sala de atendimento";
-          if (atendente?.sala_atual_id) {
-            const sala = salasMap.get(atendente.sala_atual_id);
-            if (sala?.nome) localAtendimento = sala.nome;
-          }
-        }
-
-        const novoChamado = {
-          ...chamandoAgora,
-          tipo_nome: tipo?.nome || "Atendimento",
-          tipo_cor: tipo?.cor || "#333",
-          atendente_nome: atendente?.nome || "Atendente",
-          atendente_guiche: localAtendimento,
-        };
-
-        const novoTs = novoChamado.hora_chamada?.toMillis?.() ?? null;
-        const isNovo = lastChamadoRef.current.id !== novoChamado.id || lastChamadoRef.current.ts !== novoTs;
-
-        if (isNovo) {
-          lastChamadoRef.current = { id: novoChamado.id, ts: novoTs };
-          const nomePrincipal = getNomeExibicao(novoChamado);
-          dlog(`[Chamada] ${nomePrincipal} → ${localAtendimento}`);
-
-          const tocar = async () => {
-            try {
-              await playBeep();
-              const tid = setTimeout(async () => {
-                pendingTimeoutsRef.current.delete(tid);
-                setAnunciando(true);
-                try { 
-                  await anunciarChamada(novoChamado, nomePrincipal); 
-                }
-                finally { 
-                  setAnunciando(false); 
-                }
-              }, 800);
-              pendingTimeoutsRef.current.add(tid);
-            } catch (e) {
-              dwarn("[Audio] Autoplay bloqueado: " + (e?.message || e));
-              setAutoplayBlocked(true);
-            }
-          };
-          tocar();
-        }
-
-        setChamando((prev) => {
-          if (prev?.id !== novoChamado.id) setHighlightKey((k) => k + 1);
-          return novoChamado;
-        });
+    const unsubscribeChamando = onSnapshot(
+      qChamando,
+      processarChamadaAtiva,
+      (err) => {
+        derror("[Firestore] Erro no listener de chamada ativa: " + (err?.message || err));
+        setError(getFriendlyFirebaseError(err, "Erro ao atualizar chamada no painel."));
       }
+    );
 
-      const historico = docsHoje
-        .filter((d) => d.hora_chamada && d.id !== chamandoAgora?.id)
-        .sort((a, b) => (b.hora_chamada?.toMillis?.() ?? 0) - (a.hora_chamada?.toMillis?.() ?? 0))
-        .slice(0, 5)
-        .map((it) => {
-          const tipo = tiposMap.get(it.tipo_atendimento_id);
-          const atendente = atendentesMap.get(it.atendente_id);
-          let localAtendimento = it.atendente_guiche;
-          if (!localAtendimento) {
-            localAtendimento = atendente?.guiche || "Sala de atendimento";
-            if (atendente?.sala_atual_id) {
-              const sala = salasMap.get(atendente.sala_atual_id);
-              if (sala?.nome) localAtendimento = sala.nome;
-            }
-          }
-          return { ...it, tipo_nome: tipo?.nome || "Atendimento", atendente_guiche: localAtendimento };
-        });
-      setUltimosChamados(historico);
-    };
-
-    const unsubscribe = onSnapshot(q, processSnapshot, (err) => {
+    const unsubscribeHistorico = onSnapshot(qHistorico, processarHistorico, (err) => {
       if (err.code === "failed-precondition" || err.message?.includes("index")) {
-        dwarn("[Firestore] Sem índice, usando fallback");
-        const qFallback = query(collection(db, collectionPath), where("cras_id", "==", selectedCrasId), limit(500));
-        unsubscribeFallback = onSnapshot(qFallback, processSnapshot, (errFb) => {
-          derror("[Firestore] Fallback falhou: " + (errFb?.message || errFb));
+        dwarn("[Firestore] Sem índice no histórico, usando fallback");
+        const qFallback = query(
+          collection(db, collectionPath),
+          where("cras_id", "==", selectedCrasId),
+          limit(200)
+        );
+        unsubscribeHistoricoFallback = onSnapshot(qFallback, processarHistorico, (errFb) => {
+          derror("[Firestore] Fallback do histórico falhou: " + (errFb?.message || errFb));
           setError(getFriendlyFirebaseError(errFb, "Erro no modo de compatibilidade."));
         });
       } else {
-        derror("[Firestore] Erro: " + (err?.message || err));
-        setError(getFriendlyFirebaseError(err, "Erro ao atualizar painel."));
+        derror("[Firestore] Erro no histórico: " + (err?.message || err));
+        setError(getFriendlyFirebaseError(err, "Erro ao atualizar histórico do painel."));
       }
     });
 
     return () => {
-      unsubscribe();
-      if (unsubscribeFallback) unsubscribeFallback();
+      unsubscribeChamando();
+      unsubscribeHistorico();
+      if (unsubscribeHistoricoFallback) unsubscribeHistoricoFallback();
       pendingTimeoutsRef.current.forEach(clearTimeout);
       pendingTimeoutsRef.current.clear();
       try { window.speechSynthesis?.cancel(); } catch (_) {}

@@ -12,6 +12,7 @@ import Card from './ui/Card';
 import Button from './ui/Button';
 import InlineAlert from './ui/InlineAlert';
 import ConfirmDialog from './ui/ConfirmDialog';
+import OfflineBanner from './ui/OfflineBanner';
 import { normalizeRole, getNomeCidadao } from '../utils';
 
 const RecepcaoPage = ({ db, appId, crasUnidades, tiposAtendimento, atendentesList, userProfile }) => {
@@ -101,7 +102,9 @@ const RecepcaoPage = ({ db, appId, crasUnidades, tiposAtendimento, atendentesLis
   }
 
   return (
-    <div className="flex flex-col xl:flex-row gap-6 items-start">
+    <div className="flex flex-col gap-4 w-full">
+      <OfflineBanner />
+      <div className="flex flex-col xl:flex-row gap-6 items-start">
       {/* Coluna Principal: Status, Formulário e Fila Ativa */}
       <div className="flex-1 w-full space-y-6 min-w-0">
         
@@ -337,6 +340,7 @@ const RecepcaoPage = ({ db, appId, crasUnidades, tiposAtendimento, atendentesLis
         onCancel={() => setShowConfirmLogout(false)}
         type="warning"
       />
+      </div>
     </div>
   );
 };

@@ -13,8 +13,6 @@ const RemanejarModal = ({
   const [selectedTipo, setSelectedTipo] = useState("");
   const [selectedAtendenteId, setSelectedAtendenteId] = useState("");
 
-  if (!isOpen || !atendimento) return null;
-
   const simplify = (s) =>
     String(s || "")
       .toLowerCase()
@@ -37,6 +35,7 @@ const RemanejarModal = ({
   };
 
   const atendentesAtivos = useMemo(() => {
+    if (!atendimento) return [];
     const list = Array.isArray(atendentesList) ? atendentesList : [];
     const crasId = atendimento?.cras_id || "";
     return list.filter((at) => {
@@ -78,6 +77,7 @@ const RemanejarModal = ({
   }, [selectedTipo, tiposAtendimento, atendentesAtivos]);
 
   const tiposComDisponibilidade = useMemo(() => {
+    if (!atendimento) return [];
     const tipos = Array.isArray(tiposAtendimento) ? tiposAtendimento : [];
 
     const isServicosDia = (nome) => {
@@ -106,6 +106,8 @@ const RemanejarModal = ({
       })
       .sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
   }, [tiposAtendimento, atendimento, atendentesAtivos]);
+
+  if (!isOpen || !atendimento) return null;
 
   const handleConfirm = () => {
     if (selectedTipo) {

@@ -1487,15 +1487,22 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
       
       if (formData.foto) {
         if (formData.foto.startsWith('data:image')) {
-           try {
-             const cpfSafe = cpfLimpo || `nocpf_${Date.now()}`;
-             const storageRef = ref(storage, `artifacts/${appId}/public/images/cidadaos/${cpfSafe}_photo.jpg`);
-             await uploadString(storageRef, formData.foto, 'data_url');
-             fotoUrl = await getDownloadURL(storageRef);
-           } catch (errUpload) {
-             console.error("Erro ao fazer upload da foto:", errUpload);
-             if (dadosOriginais && dadosOriginais.fotoUrl) {
-                fotoUrl = dadosOriginais.fotoUrl;
+           if (!storage) {
+             console.warn("Firebase Storage indisponível — registro continuará sem foto.");
+             if (dadosOriginais?.fotoUrl) {
+               fotoUrl = dadosOriginais.fotoUrl;
+             }
+           } else {
+             try {
+               const cpfSafe = cpfLimpo || `nocpf_${Date.now()}`;
+               const storageRef = ref(storage, `artifacts/${appId}/public/images/cidadaos/${cpfSafe}_photo.jpg`);
+               await uploadString(storageRef, formData.foto, 'data_url');
+               fotoUrl = await getDownloadURL(storageRef);
+             } catch (errUpload) {
+               console.error("Erro ao fazer upload da foto:", errUpload);
+               if (dadosOriginais?.fotoUrl) {
+                  fotoUrl = dadosOriginais.fotoUrl;
+               }
              }
            }
         } else {

@@ -3,6 +3,7 @@ import { useAtendente } from "../hooks/useAtendente";
 import { useAuth } from "../contexts/AuthContext";
 import { getNomeCidadao, normalizeRole } from "../utils";
 import InlineAlert from "./ui/InlineAlert";
+import OfflineBanner from "./ui/OfflineBanner";
 import { MonitorPlay } from "lucide-react";
 
 // Sub-components
@@ -156,7 +157,9 @@ function AtendentePage({
   // NOTE: StartExpediente logic is now handled inside PainelAtendimento
 
   return (
-    <div className="h-full w-full bg-gray-50 p-4 overflow-y-auto" id="atendente-page-container">
+    <div className="h-full w-full bg-gray-50 overflow-y-auto" id="atendente-page-container">
+      <OfflineBanner />
+      <div className="p-4">
       {uiError && (
         <InlineAlert 
           variant={String(uiError).startsWith("SUCCESS:") ? "success" : "error"} 
@@ -287,6 +290,7 @@ function AtendentePage({
         getNomeCidadao={getNomeCidadao}
         getWaitMinutes={getWaitMinutes}
       />
+      </div>
     </div>
   );
 }
