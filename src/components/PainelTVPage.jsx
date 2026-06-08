@@ -364,6 +364,7 @@ const anunciarChamada = (registro, nomePrincipal) => {
 };
 
 const SOM_ATIVO_KEY = "painel_tv_som_desbloqueado";
+const EXIBICAO_MINIMA_MS = 90 * 1000;
 
 // ─────────────────────────────────────────────────────────────────
 // PAINEL DE DIAGNÓSTICO
@@ -523,9 +524,28 @@ function PainelTVPage({
   const [anunciando, setAnunciando] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
 
+  const tiposMap = useMemo(() => new Map((tiposAtendimento || []).map((t) => [t.id, t])), [tiposAtendimento]);
+  const atendentesMap = useMemo(() => new Map((atendentesList || []).map((a) => [a.id, a])), [atendentesList]);
+  const salasMap = useMemo(() => new Map((salasAtendimento || []).map((s) => [s.id, s])), [salasAtendimento]);
+
   const lastChamadoRef = useRef({ id: null, ts: null });
   const pendingTimeoutsRef = useRef(new Set());
   const somAtivoRef = useRef(somAtivo);
+  const chamandoRawRef = useRef(null);
+  const exibicaoDesdeRef = useRef(0);
+  const montarChamadoRef = useRef(null);
+  const tiposMapRef = useRef(tiposMap);
+  const atendentesMapRef = useRef(atendentesMap);
+  const salasMapRef = useRef(salasMap);
+
+  useEffect(() => { tiposMapRef.current = tiposMap; }, [tiposMap]);
+  useEffect(() => { atendentesMapRef.current = atendentesMap; }, [atendentesMap]);
+  useEffect(() => { salasMapRef.current = salasMap; }, [salasMap]);
+
+  useEffect(() => {
+    if (!chamandoRawRef.current || !montarChamadoRef.current) return;
+    setChamando(montarChamadoRef.current(chamandoRawRef.current));
+  }, [tiposMap, atendentesMap, salasMap]);
 
   const cancelarAnunciosPendentes = () => {
     pendingTimeoutsRef.current.forEach(clearTimeout);
@@ -539,6 +559,9 @@ function PainelTVPage({
 
   useEffect(() => {
     lastChamadoRef.current = { id: null, ts: null };
+    chamandoRawRef.current = null;
+    exibicaoDesdeRef.current = 0;
+    setChamando(null);
     cancelarAnunciosPendentes();
   }, [selectedCrasId]);
 
@@ -553,10 +576,6 @@ function PainelTVPage({
       }
     } catch {}
   }, []);
-
-  const tiposMap = useMemo(() => new Map((tiposAtendimento || []).map((t) => [t.id, t])), [tiposAtendimento]);
-  const atendentesMap = useMemo(() => new Map((atendentesList || []).map((a) => [a.id, a])), [atendentesList]);
-  const salasMap = useMemo(() => new Map((salasAtendimento || []).map((s) => [s.id, s])), [salasAtendimento]);
 
   const unlockAudio = async () => {
     try {
@@ -636,11 +655,16 @@ function PainelTVPage({
     return () => clearInterval(interval);
   }, []);
 
+  const isNomeValido = (str) =>
+    !!str && String(str).trim() !== "-" && String(str).trim() !== "." && String(str).trim().length > 1;
+
   const getNomeExibicao = (registro) => {
     if (!registro) return "Nome não informado";
-    if (registro.nome_chamada_final) return normalizeName(String(registro.nome_chamada_final));
+    if (isNomeValido(registro.nome_chamada_final)) {
+      return normalizeName(String(registro.nome_chamada_final));
+    }
     const cid = registro.cidadao || {};
-    const isValido = (str) => !!str && String(str).trim() !== "-" && String(str).trim() !== "." && String(str).trim().length > 1;
+    const isValido = isNomeValido;
     const social = isValido(cid.nomeSocial) ? cid.nomeSocial : "";
     const nome = isValido(cid.nome) ? cid.nome : "";
     const exibicao = isValido(registro.nome_exibicao) ? registro.nome_exibicao : "";
@@ -735,18 +759,25 @@ function PainelTVPage({
 
     const deveIgnorarChamada = (registro) => {
       if (!registro || registro.status === "cancelado") return true;
-      const tipo = tiposMap.get(registro.tipo_atendimento_id);
+      const tipo = tiposMapRef.current.get(registro.tipo_atendimento_id);
       return (tipo?.nome || "").toLowerCase().includes("abordagem social");
     };
 
     const montarChamadoExibicao = (registro) => {
-      const tipo = tiposMap.get(registro.tipo_atendimento_id);
-      const atendente = atendentesMap.get(registro.atendente_id);
+      const tipo = tiposMapRef.current.get(registro.tipo_atendimento_id);
+      const atendenteId = registro.atendente_id;
+      const atendente =
+        atendentesMapRef.current.get(atendenteId) ||
+        (atendenteId
+          ? Array.from(atendentesMapRef.current.values()).find(
+              (a) => a?.uid === atendenteId || a?.id === atendenteId
+            )
+          : null);
       let localAtendimento = registro.atendente_guiche;
       if (!localAtendimento) {
         localAtendimento = atendente?.guiche || "Sala de atendimento";
         if (atendente?.sala_atual_id) {
-          const sala = salasMap.get(atendente.sala_atual_id);
+          const sala = salasMapRef.current.get(atendente.sala_atual_id);
           if (sala?.nome) localAtendimento = sala.nome;
         }
       }
@@ -758,6 +789,7 @@ function PainelTVPage({
         atendente_guiche: localAtendimento,
       };
     };
+    montarChamadoRef.current = montarChamadoExibicao;
 
     const dispararAnuncio = (novoChamado, localAtendimento) => {
       if (!somAtivoRef.current) {
@@ -804,10 +836,15 @@ function PainelTVPage({
 
       if (!chamandoAgora) {
         chamadoAtualIdRef.current = null;
-        setChamando(null);
+        const tempoNaTela = Date.now() - exibicaoDesdeRef.current;
+        if (!chamandoRawRef.current || tempoNaTela >= EXIBICAO_MINIMA_MS) {
+          chamandoRawRef.current = null;
+          setChamando(null);
+        }
         return;
       }
 
+      chamandoRawRef.current = chamandoAgora;
       const novoChamado = montarChamadoExibicao(chamandoAgora);
       const novoTs = getMillis(novoChamado.hora_chamada) || null;
       const isNovoId = lastChamadoRef.current.id !== novoChamado.id;
@@ -822,12 +859,14 @@ function PainelTVPage({
           id: novoChamado.id,
           ts: novoTs ?? lastChamadoRef.current.ts,
         };
+        exibicaoDesdeRef.current = Date.now();
         cancelarAnunciosPendentes();
         dispararAnuncio(novoChamado, novoChamado.atendente_guiche);
       } else if (!lastChamadoRef.current.ts && novoTs) {
         lastChamadoRef.current.ts = novoTs;
       }
 
+      exibicaoDesdeRef.current = Date.now();
       setChamando((prev) => {
         if (prev?.id !== novoChamado.id) setHighlightKey((k) => k + 1);
         return novoChamado;
@@ -915,7 +954,7 @@ function PainelTVPage({
       pendingTimeoutsRef.current.clear();
       try { window.speechSynthesis?.cancel(); } catch (_) {}
     };
-  }, [db, selectedCrasId, collectionPath, tiposMap, atendentesMap, salasMap]);
+  }, [db, selectedCrasId, collectionPath]);
 
   const testarTTS = () => {
     dlog("[Debug] Teste manual de TTS disparado");
