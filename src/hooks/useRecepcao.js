@@ -80,6 +80,17 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
   const [possiveisBloqueadosNome, setPossiveisBloqueadosNome] = useState([]);
   const [mostrarModalBloqueioNome, setMostrarModalBloqueioNome] = useState(false);
   const [dadosOriginais, setDadosOriginais] = useState(null);
+  const [cpfConsultado, setCpfConsultado] = useState(null);
+
+  const limparCpf = (valor) => String(valor || "").replace(/\D/g, "");
+
+  const cpfJaExisteNoSistema = (cpf) => {
+    const cpfLimpo = limparCpf(cpf);
+    if (cpfLimpo.length !== 11) return false;
+    if (getFromCache(cpfLimpo)) return true;
+    if (dadosOriginais && limparCpf(cpfConsultado) === cpfLimpo) return true;
+    return false;
+  };
   const [expedienteIniciado, setExpedienteIniciado] = useState(false);
   const [loadingExpediente, setLoadingExpediente] = useState(true);
   const userUid = userProfile?.uid || userProfile?.id || null;
@@ -403,6 +414,8 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
       setCidadaoOutraUnidadeInfo(null);
       setCidadaoOutraUnidadePending(null);
       setCrossUnitConfirmado(false);
+      setDadosOriginais(null);
+      setCpfConsultado(null);
     }
     if (name === "nome") {
       setPossiveisBloqueadosNome([]);
@@ -433,11 +446,20 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
     const nomeValido = isValidInfo(dados.nome) ? dados.nome : prevState.nome;
     const socialValido = isValidInfo(dados.nomeSocial) ? dados.nomeSocial : prevState.nomeSocial;
 
+    const cpfDigitado = limparCpf(cpfOrigem || prevState.cpf);
+    const cpfCadastro = limparCpf(dados.cpf);
+    const cpfFinal =
+      cpfDigitado.length === 11
+        ? (cpfOrigem || prevState.cpf || cpfDigitado)
+        : cpfCadastro.length === 11
+          ? cpfCadastro
+          : (cpfOrigem || prevState.cpf || dados.cpf || "");
+
     return {
       ...prevState,
       nome: nomeValido,
       nomeSocial: socialValido,
-      cpf: dados.cpf || prevState.cpf || cpfOrigem || "",
+      cpf: cpfFinal,
       rg: dados.rg || prevState.rg,
       nis: dados.nis || prevState.nis,
       tituloEleitor: dados.tituloEleitor || prevState.tituloEleitor,
@@ -585,6 +607,7 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
             }
           } catch {}
           setDadosOriginais(cached);
+          setCpfConsultado(cpfLimpo);
           setFormData((prev) => preencherAPartirDadosCidadao(cached, formData.cpf, prev));
           setError(null);
           if (!cached.foto && !cached.fotoUrl) {
@@ -639,6 +662,7 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
           } catch {}
           setInCache(cpfLimpo, dados);
           setDadosOriginais(dados);
+          setCpfConsultado(cpfLimpo);
           setFormData((prev) =>
             preencherAPartirDadosCidadao(dados, formData.cpf, prev)
           );
@@ -669,6 +693,7 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
     setCrossUnitConfirmado(true);
     if (cpf && cpf.length === 11) setInCache(cpf, dados);
     setDadosOriginais(dados);
+    setCpfConsultado(cpf);
     setFormData((prev) => preencherAPartirDadosCidadao(dados, cpf || formData.cpf, prev));
     setError(null);
     if (cpf && cpf.length === 11 && !dados.foto && !dados.fotoUrl) {
@@ -683,6 +708,7 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
     setCidadaoOutraUnidadePending(null);
     setCrossUnitConfirmado(false);
     setDadosOriginais(null);
+    setCpfConsultado(null);
     setCpfBloqueadoInfo(null);
     setPossiveisBloqueadosNome([]);
     setMostrarModalBloqueioNome(false);
@@ -791,8 +817,14 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
           }
 
           setDadosOriginais(dados);
+          const cpfEncontrado = limparCpf(dados?.cpf);
+          if (cpfEncontrado.length === 11) setCpfConsultado(cpfEncontrado);
           setFormData((prev) =>
-            preencherAPartirDadosCidadao(dados, dados.cpf || "", prev)
+            preencherAPartirDadosCidadao(
+              dados,
+              cpfEncontrado.length === 11 ? cpfEncontrado : (prev.cpf || dados.cpf || ""),
+              prev
+            )
           );
         }
       }
@@ -1096,14 +1128,14 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
       return;
     }
 
-    const cpfLimpo = (formData.cpf || "").replace(/\D/g, "");
+    const cpfLimpo = limparCpf(formData.cpf);
 
     if (cpfLimpo && cpfLimpo.length !== 11) {
       setError("Padronizar CPF: O CPF deve conter exatamente 11 números.");
       return;
     }
 
-    if (cpfLimpo && !validateCPF(cpfLimpo)) {
+    if (cpfLimpo && !validateCPF(cpfLimpo) && !cpfJaExisteNoSistema(cpfLimpo)) {
       setError("CPF inválido. Verifique os números digitados.");
       return;
     }
@@ -1198,7 +1230,7 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
       }
     }
 
-    if (dadosOriginais && cpfLimpo.length === 11 && dadosOriginais.cpf === cpfLimpo) {
+    if (dadosOriginais && cpfLimpo.length === 11 && limparCpf(dadosOriginais.cpf) === cpfLimpo) {
       const nomeAtual = normalizeName(nomeBase);
       const nomeOriginal = normalizeName(dadosOriginais.nome || dadosOriginais.nomeSocial || "");
       
@@ -1818,6 +1850,7 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
     };
     setFormData(initialFormData);
     setDadosOriginais(null);
+    setCpfConsultado(null);
     setError(null);
     if (!manterSenha) {
        setNomeRegistrado(null); // Renomeado N1
