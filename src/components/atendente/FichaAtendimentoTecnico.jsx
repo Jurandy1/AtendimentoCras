@@ -29,7 +29,7 @@ import {
   Briefcase, Users, ClipboardList, ArrowRightLeft, DollarSign
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
-import { searchCep, validateCPF } from '../../utils';
+import { searchCep, validateCPF, formatCpf, normalizeName } from '../../utils';
 import Card from '../ui/Card';
 import Button from '../ui/Button';
 
@@ -395,7 +395,18 @@ const buildInitialState = (cidadao={}, rmaData={}) => {
       }
     }
   }
+  const cpfNumeros = String(cidadao.cpf || '').replace(/\D/g, '');
   return {
+    // ── 1. Identificação (editável pelo técnico) ────────────────────────────
+    nome:                 cidadao.nome                 || '',
+    nomeSocial:           cidadao.nomeSocial           || '',
+    cpf:                  cpfNumeros.length === 11 ? formatCpf(cpfNumeros) : (cidadao.cpf || ''),
+    rg:                   cidadao.rg                   || '',
+    nomeMae:              cidadao.nomeMae              || '',
+    nomePai:              cidadao.nomePai              || '',
+    naturalidade:         cidadao.naturalidade         || '',
+    uf:                   cidadao.uf                   || '',
+    nacionalidade:        cidadao.nacionalidade        || '',
     // ── Perfil (preservado de DadosComplementares) ──────────────────────────
     tituloEleitor:        cidadao.tituloEleitor        || '',
     tituloEleitorZona:    cidadao.tituloEleitorZona    || '',
@@ -580,7 +591,11 @@ const FichaAtendimentoTecnico = forwardRef(
     const handleChange = (field, value) => {
       setFs(prev => {
         let v = value;
-        if (field === 'dataNascimento') {
+        if (field === 'cpf') {
+          v = formatCpf(value);
+        } else if (field === 'uf') {
+          v = String(value || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2);
+        } else if (field === 'dataNascimento') {
           v = value.replace(/\D/g,'').substring(0,8);
           if (v.length > 4) v = `${v.slice(0,2)}/${v.slice(2,4)}/${v.slice(4)}`;
           else if (v.length > 2) v = `${v.slice(0,2)}/${v.slice(2)}`;
@@ -738,13 +753,73 @@ const FichaAtendimentoTecnico = forwardRef(
     // Salvar
     const salvar = async () => {
       if (!db || !atendimentoAtual?.id) return false;
-      const cpfLimpo = atendimentoAtual.cidadao?.cpf?.replace(/\D/g,'');
+      const cRecp = atendimentoAtual.cidadao || {};
+      const orig = originalRef.current || {};
+
+      const pickIdent = (key) => {
+        const fromFs = fs[key];
+        if (fromFs !== undefined && fromFs !== null && String(fromFs).trim() !== '') {
+          return typeof fromFs === 'string' ? fromFs.trim() : fromFs;
+        }
+        const fromRec = cRecp[key];
+        return fromRec != null ? (typeof fromRec === 'string' ? fromRec.trim() : fromRec) : '';
+      };
+
+      const identValores = {
+        nome: pickIdent('nome'),
+        nomeSocial: pickIdent('nomeSocial'),
+        cpf: pickIdent('cpf'),
+        rg: pickIdent('rg'),
+        nomeMae: pickIdent('nomeMae'),
+        nomePai: pickIdent('nomePai'),
+        naturalidade: pickIdent('naturalidade'),
+        uf: pickIdent('uf'),
+        nacionalidade: pickIdent('nacionalidade'),
+        dataNascimento: pickIdent('dataNascimento'),
+      };
+
+      const norm = (v) => String(v ?? '').trim();
+      const normCpf = (v) => String(v ?? '').replace(/\D/g, '');
+      const identAlterado = {};
+      Object.keys(identValores).forEach((key) => {
+        const atual = key === 'cpf' ? normCpf(identValores[key]) : norm(identValores[key]);
+        const anterior = key === 'cpf'
+          ? normCpf(orig[key] ?? cRecp[key])
+          : norm(orig[key] ?? cRecp[key]);
+        if (atual !== anterior) {
+          identAlterado[key] = identValores[key];
+        }
+      });
+
+      const cpfLimpo = String(identAlterado.cpf ?? cRecp.cpf ?? '').replace(/\D/g, '');
+      const nomeTrim = norm(identValores.nome);
+      const nomeSocialTrim = norm(identValores.nomeSocial);
+
+      if (!nomeTrim && !nomeSocialTrim && !norm(cRecp.nome) && !norm(cRecp.nomeSocial)) {
+        alert('Informe o nome completo ou nome social na seção Identificação.');
+        return false;
+      }
+      if ('cpf' in identAlterado) {
+        if (!cpfLimpo || cpfLimpo.length !== 11) {
+          alert('CPF incompleto. Informe os 11 dígitos.');
+          return false;
+        }
+        if (!validateCPF(cpfLimpo)) {
+          alert('CPF inválido. Verifique os números digitados.');
+          return false;
+        }
+        identAlterado.cpf = formatCpf(cpfLimpo);
+      }
       if (precisaEspecificar(fs.origemDemanda) && !fs.origemDemandaEspecificar?.trim()) {
         alert(`Preencha a especificação para: ${fs.origemDemanda}`); return false;
       }
       setLoading(true);
       try {
+        const cpfParaDoc = ('cpf' in identAlterado ? cpfLimpo : String(cRecp.cpf || '').replace(/\D/g, ''));
+        const nomeExibicao = normalizeName(nomeSocialTrim || nomeTrim || cRecp.nomeSocial || cRecp.nome);
+        const nomeAlterado = 'nome' in identAlterado || 'nomeSocial' in identAlterado;
         const cidPayload = {
+          ...identAlterado,
           tituloEleitor:fs.tituloEleitor, tituloEleitorZona:fs.tituloEleitorZona,
           tituloEleitorSecao:fs.tituloEleitorSecao, escolaridade:fs.escolaridade,
           religiao:fs.religiao, orientacaoSexual:fs.orientacaoSexual,
@@ -782,8 +857,9 @@ const FichaAtendimentoTecnico = forwardRef(
         };
 
         const batch = writeBatch(db);
-        if (cpfLimpo && cpfLimpo.length === 11 && validateCPF(cpfLimpo))
-          batch.set(doc(db, `artifacts/${appId}/public/data/cidadaos`, cpfLimpo), cidPayload, { merge: true });
+        if (cpfParaDoc.length === 11 && validateCPF(cpfParaDoc)) {
+          batch.set(doc(db, `artifacts/${appId}/public/data/cidadaos`, cpfParaDoc), cidPayload, { merge: true });
+        }
 
         const atdUpdate = {};
         const CIDADAO_KEYS = [
@@ -797,6 +873,11 @@ const FichaAtendimentoTecnico = forwardRef(
           'substancias_psicoativas','substancias_ilicito_outro',
         ];
         CIDADAO_KEYS.forEach(k => { if (k in cidPayload) atdUpdate[`cidadao.${k}`] = cidPayload[k]; });
+        Object.keys(identAlterado).forEach(k => { atdUpdate[`cidadao.${k}`] = identAlterado[k]; });
+        if (nomeAlterado && nomeExibicao) {
+          atdUpdate.nome_exibicao = nomeExibicao;
+          atdUpdate.nome_chamada = nomeExibicao;
+        }
         batch.update(doc(db, `artifacts/${appId}/public/data/atendimentos`, atendimentoAtual.id), atdUpdate);
         await batch.commit();
 
@@ -839,7 +920,6 @@ const FichaAtendimentoTecnico = forwardRef(
     useImperativeHandle(ref, () => ({ salvar, hasUnsavedChanges: () => isDirty, discardChanges: descartarAlteracoes }));
 
     if (!atendimentoAtual?.cidadao) return null;
-    const c = atendimentoAtual.cidadao;
 
     return (
       <Card className="overflow-hidden border-t-4 border-t-blue-700 shadow-md">
@@ -860,13 +940,26 @@ const FichaAtendimentoTecnico = forwardRef(
 
           {/* 1. IDENTIFICAÇÃO */}
           <SecaoFicha numero={1} titulo="Identificação" icon={User} cor="#1e40af" />
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-            <ReadOnlyField label="Nome completo" value={c.nome} />
-            <ReadOnlyField label="CPF" value={c.cpf} />
-            <ReadOnlyField label="Data de nascimento" value={normalizeDateForInput(c.dataNascimento)} />
-            <ReadOnlyField label="Naturalidade / UF" value={[c.naturalidade, c.uf].filter(Boolean).join(' – ')} />
+          <p className="text-xs text-gray-500 mb-3 -mt-2">
+            Dados preenchidos na recepção. Corrija aqui apenas se houver erro ou informação faltando.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <FieldInput label="Nome completo" value={get('nome')||''} onChange={e=>handleChange('nome',e.target.value)} placeholder="Nome completo" required />
+            <FieldInput label="Nome social" value={get('nomeSocial')||''} onChange={e=>handleChange('nomeSocial',e.target.value)} placeholder="Nome social (se houver)" />
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <FieldInput label="CPF" value={get('cpf')||''} onChange={e=>handleChange('cpf',e.target.value)} placeholder="Conforme cadastro na recepção" inputMode="numeric" autoComplete="off" />
+            <FieldInput label="RG" value={get('rg')||''} onChange={e=>handleChange('rg',e.target.value)} placeholder="RG" />
+            <FieldInput label="Data de nascimento" value={get('dataNascimento')||''} onChange={e=>handleChange('dataNascimento',e.target.value)} placeholder="DD/MM/AAAA" inputMode="numeric" />
+            <FieldInput label="Nacionalidade" value={get('nacionalidade')||''} onChange={e=>handleChange('nacionalidade',e.target.value)} placeholder="Ex.: Brasileira" />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <FieldInput label="Nome da mãe" value={get('nomeMae')||''} onChange={e=>handleChange('nomeMae',e.target.value)} placeholder="Nome da mãe" />
+            <FieldInput label="Nome do pai" value={get('nomePai')||''} onChange={e=>handleChange('nomePai',e.target.value)} placeholder="Nome do pai" />
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <FieldInput label="Naturalidade" value={get('naturalidade')||''} onChange={e=>handleChange('naturalidade',e.target.value)} placeholder="Cidade de nascimento" />
+            <FieldInput label="UF" value={get('uf')||''} onChange={e=>handleChange('uf',e.target.value)} placeholder="MA" maxLength={2} />
             <FieldSelect label="Sexo" value={get('sexo')||''} onChange={e=>handleChange('sexo',e.target.value)}>
               <option value="">Selecione</option>
               {['Masculino','Feminino','Outro'].map(o=><option key={o}>{o}</option>)}
@@ -875,6 +968,8 @@ const FichaAtendimentoTecnico = forwardRef(
               <option value="">Selecione</option>
               {['Branca','Preta / Negra','Parda','Amarela','Indígena'].map(o=><option key={o}>{o}</option>)}
             </FieldSelect>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <FieldSelect label="Identidade de gênero" value={get('identidadeGenero')||''} onChange={e=>handleChange('identidadeGenero',e.target.value)}>
               <option value="">Selecione</option>
               {['Homem cisgênero','Mulher cisgênero','Homem transgênero','Mulher transgênera','Não binário','Travesti','Prefiro não informar'].map(o=><option key={o}>{o}</option>)}
