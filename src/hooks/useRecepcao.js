@@ -29,6 +29,7 @@ import {
   normalizeDate, 
   normalizeDateForInput, 
   validateCPF,
+  formatCpf,
   logAdminAction
 } from "../utils";
 import { normalizeRole } from "../utils";
@@ -84,12 +85,9 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
 
   const limparCpf = (valor) => String(valor || "").replace(/\D/g, "");
 
-  const cpfJaExisteNoSistema = (cpf) => {
+  const cpfFoiConsultadoComSucesso = (cpf) => {
     const cpfLimpo = limparCpf(cpf);
-    if (cpfLimpo.length !== 11) return false;
-    if (getFromCache(cpfLimpo)) return true;
-    if (dadosOriginais && limparCpf(cpfConsultado) === cpfLimpo) return true;
-    return false;
+    return cpfLimpo.length === 11 && limparCpf(cpfConsultado) === cpfLimpo;
   };
   const [expedienteIniciado, setExpedienteIniciado] = useState(false);
   const [loadingExpediente, setLoadingExpediente] = useState(true);
@@ -407,7 +405,8 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+    const fieldValue = name === "cpf" ? formatCpf(value) : value;
+    setFormData((prev) => ({ ...prev, [name]: fieldValue }));
     if (name === "cpf") {
       setError(null);
       setCpfBloqueadoInfo(null);
@@ -448,12 +447,13 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
 
     const cpfDigitado = limparCpf(cpfOrigem || prevState.cpf);
     const cpfCadastro = limparCpf(dados.cpf);
-    const cpfFinal =
+    const cpfNumeros =
       cpfDigitado.length === 11
-        ? (cpfOrigem || prevState.cpf || cpfDigitado)
+        ? cpfDigitado
         : cpfCadastro.length === 11
           ? cpfCadastro
-          : (cpfOrigem || prevState.cpf || dados.cpf || "");
+          : cpfDigitado || cpfCadastro;
+    const cpfFinal = cpfNumeros.length === 11 ? formatCpf(cpfNumeros) : (cpfOrigem || prevState.cpf || "");
 
     return {
       ...prevState,
@@ -560,6 +560,11 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
     }
 
     if (!cpfLimpo) return;
+
+    if (!validateCPF(cpfLimpo)) {
+      setError("CPF inválido. Verifique os números digitados.");
+      return;
+    }
 
     try {
       setBuscandoCidadao(true);
@@ -1135,7 +1140,7 @@ export const useRecepcao = ({ db, appId, userProfile, crasUnidades, tiposAtendim
       return;
     }
 
-    if (cpfLimpo && !validateCPF(cpfLimpo) && !cpfJaExisteNoSistema(cpfLimpo)) {
+    if (cpfLimpo && !validateCPF(cpfLimpo) && !cpfFoiConsultadoComSucesso(cpfLimpo)) {
       setError("CPF inválido. Verifique os números digitados.");
       return;
     }
