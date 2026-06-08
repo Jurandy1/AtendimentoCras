@@ -1,12 +1,113 @@
 import { useMemo, useState, useEffect } from 'react';
 import { 
-  collection, query, where, orderBy, limit, startAfter, startAt, endAt, 
+  collection, query, where, orderBy, limit, startAfter,
   onSnapshot, deleteDoc, doc, addDoc, setDoc, updateDoc, getDoc, getDocs, documentId,
   writeBatch, deleteField, serverTimestamp, Timestamp, getCountFromServer
 } from 'firebase/firestore';
 import { logAdminAction } from '../utils/logger';
-import { getFriendlyFirebaseError, getIBGEMunicipiosByUF, normalizeDate, normalizeName, simplify, isStrictlyBrazilian, inferNationalityFromNaturalidade } from '../utils/helpers';
+import { getFriendlyFirebaseError, getIBGEMunicipiosByUF, normalizeDate, normalizeName, simplify, isStrictlyBrazilian, inferNationalityFromNaturalidade, formatCpf } from '../utils/helpers';
 import { GOOGLE_SHEETS_TOKEN, GOOGLE_SHEETS_WEBAPP_URL } from '../constants';
+
+const BUSCA_LOTE = 500;
+const BUSCA_MAX_DOCS = 5000;
+
+const temConteudoValor = (v) => {
+  if (v == null || v === undefined) return false;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === 'object') {
+    if (typeof v.toDate === 'function' || v instanceof Date) return true;
+    if (typeof v.toMillis === 'function') return true;
+    return Object.values(v).some((x) => temConteudoValor(x));
+  }
+  if (typeof v === 'boolean') return v === true;
+  const s = String(v).trim();
+  return s !== '' && s !== 'nao';
+};
+
+const INDICADORES_FICHA = [
+  ['Ficha social atualizada', (u) => u.ficha_atualizada_em || u.ultima_atualizacao_em || u.ultimaAtualizacaoFicha],
+  ['Resumo do último atendimento', (u) => u.ultimoAtendimentoResumo],
+  ['Tipo de acompanhamento', (u) => u.tipoAcompanhamento],
+  ['Doenças / transtornos', (u) => u.doencas_mentais],
+  ['Substâncias psicoativas', (u) => u.substancias_psicoativas],
+  ['Violações de direitos', (u) => u.violacoes],
+  ['Encaminhamentos realizados', (u) => u.encaminhamentos_externos],
+  ['Encaminhamento recebido', (u) => u.encaminhamento_recebido],
+  ['Avaliação de moradia', (u) => u.moradia_rua || u.moradia_amigos || u.moradia_acolhimento],
+  ['Benefícios sociais', (u) => u.beneficio_bolsa_familia || u.beneficio_bpc || (Array.isArray(u.beneficios_eventuais) && u.beneficios_eventuais.length > 0)],
+  ['Visita esporádica registrada', (u) => u.ultima_visita_esporadica],
+  ['Habilidades / cursos', (u) => u.habilidadesProfissionais || u.interesseCursoQual],
+];
+
+const getMillisValor = (v) => {
+  if (!v) return 0;
+  if (typeof v.toMillis === 'function') return v.toMillis();
+  if (typeof v.toDate === 'function') return v.toDate().getTime();
+  if (v instanceof Date) return v.getTime();
+  const n = new Date(v).getTime();
+  return Number.isNaN(n) ? 0 : n;
+};
+
+const montarInfoRegistro = (u, atendInfo = {}) => {
+  const indicadores = INDICADORES_FICHA
+    .filter(([, fn]) => temConteudoValor(fn(u)))
+    .map(([label]) => label);
+  const obsCidadao = String(u.ultima_visita_esporadica?.obs || '').trim();
+  const qtdAtendimentos = atendInfo.total || 0;
+  const qtdComObs = atendInfo.comObs || 0;
+  const temDadosTecnicos = indicadores.length > 0 || qtdComObs > 0 || !!obsCidadao;
+  const pontuacao = indicadores.length * 2 + qtdComObs * 4 + qtdAtendimentos + (obsCidadao ? 2 : 0);
+
+  return {
+    indicadores,
+    qtdAtendimentos,
+    qtdComObs,
+    ultimaObs: atendInfo.ultimaObs || obsCidadao || '',
+    ultimaObsData: atendInfo.ultimaObsData || '',
+    ultimoAtendente: u.ultimoAtendimentoResumo?.atendenteNome || u.ultima_visita_esporadica?.atendente_nome || '',
+    temDadosTecnicos,
+    pontuacao,
+    seguroExcluir: !temDadosTecnicos && qtdAtendimentos === 0,
+  };
+};
+
+const variantesCpfBusca = (registro) => {
+  const set = new Set();
+  const cpfLimpo = String(registro?.cpf || '').replace(/\D/g, '');
+  const idLimpo = String(registro?.id || '').replace(/\D/g, '');
+  if (registro?.cpf) set.add(String(registro.cpf).trim());
+  if (cpfLimpo.length === 11) {
+    set.add(cpfLimpo);
+    set.add(formatCpf(cpfLimpo));
+  }
+  if (idLimpo.length === 11) {
+    set.add(idLimpo);
+    set.add(formatCpf(idLimpo));
+  }
+  if (registro?.id) set.add(String(registro.id).trim());
+  return [...set].filter(Boolean);
+};
+
+const usuarioMatchesBusca = (u, termo) => {
+  const raw = String(termo || '').trim();
+  if (!raw) return true;
+
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length >= 3) {
+    const cpfDoc = String(u.cpf || u.id || '').replace(/\D/g, '');
+    if (cpfDoc.includes(digits)) return true;
+  }
+
+  const termoNorm = simplify(raw);
+  if (!termoNorm || termoNorm.length < 2) return true;
+
+  const campos = [u.nome, u.nomeSocial, u.nomeMae, u.nomePai].filter(Boolean);
+  return campos.some((campo) => {
+    const campoNorm = simplify(String(campo));
+    if (campoNorm.includes(termoNorm)) return true;
+    return campoNorm.split(/\s+/).some((palavra) => palavra.startsWith(termoNorm));
+  });
+};
 
 export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
   const [usuarios, setUsuarios] = useState([]);
@@ -16,6 +117,7 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
   const [ordem, setOrdem] = useState('recentes'); // 'alfabetica' | 'recentes'
   const [lastDocs, setLastDocs] = useState([]); // Stack of doc snapshots for pagination
   const [lastVisible, setLastVisible] = useState(null); // Last doc of current page
+  const [paginaBusca, setPaginaBusca] = useState(0);
   
   const [selectedIds, setSelectedIds] = useState([]);
   const [editing, setEditing] = useState(null);
@@ -50,6 +152,10 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
   const [filtroUnidade, setFiltroUnidade] = useState('');
   const [obsNaturalidadeById, setObsNaturalidadeById] = useState({});
   const [deletingImportados, setDeletingImportados] = useState(false);
+  const [deletingIds, setDeletingIds] = useState(() => new Set());
+  const [scanningDuplicados, setScanningDuplicados] = useState(false);
+  const [unificandoGrupo, setUnificandoGrupo] = useState(false);
+  const [resultadoDuplicados, setResultadoDuplicados] = useState(null);
   
   // Totais (Estatísticas)
   const [totalUsuarios, setTotalUsuarios] = useState(0);
@@ -244,53 +350,95 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
     return () => { isMounted = false; };
   }, [db, appId, filtroAlerta, filtroEstrangeiros]);
 
-  // EFFECT 2: Busca Normal (Lista padrão ou Pesquisa)
+  // EFFECT 2a: Busca por texto — varre a base e filtra no cliente (nome, social, mãe, CPF)
   useEffect(() => {
-    if (!db || filtroAlerta || filtroEstrangeiros) return; // Se filtro especial estiver ativo, este effect não roda
-    
+    if (!db || filtroAlerta || filtroEstrangeiros || termoBusca.trim().length < 2) return;
+
+    let cancelled = false;
+    const buscar = async () => {
+      setLoading(true);
+      try {
+        const qBase = collection(db, collectionPath);
+        const todos = [];
+        let lastDoc = null;
+
+        while (todos.length < BUSCA_MAX_DOCS) {
+          let qLote = query(qBase, orderBy('nome'), limit(BUSCA_LOTE));
+          if (lastDoc) qLote = query(qLote, startAfter(lastDoc));
+          const snap = await getDocs(qLote);
+          if (snap.empty) break;
+          snap.docs.forEach((d) => todos.push({ id: d.id, ...d.data() }));
+          lastDoc = snap.docs[snap.docs.length - 1];
+          if (snap.docs.length < BUSCA_LOTE) break;
+        }
+
+        if (cancelled) return;
+
+        const filtrados = todos
+          .filter((u) => usuarioMatchesBusca(u, termoBusca))
+          .sort((a, b) => simplify(a.nome || '').localeCompare(simplify(b.nome || ''), 'pt-BR'));
+
+        setUsuarios(filtrados);
+        setLastVisible(null);
+        setPaginaBusca(0);
+      } catch (err) {
+        console.error('Erro busca usuarios:', err);
+        if (!cancelled) setUsuarios([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    buscar();
+    return () => { cancelled = true; };
+  }, [db, appId, termoBusca, filtroAlerta, filtroEstrangeiros]);
+
+  // EFFECT 2b: Listagem padrão (sem termo de busca)
+  useEffect(() => {
+    if (!db || filtroAlerta || filtroEstrangeiros || termoBusca.trim().length >= 2) return;
+
     setLoading(true);
-    let qBase = collection(db, collectionPath);
+    const qBase = collection(db, collectionPath);
     let qFinal;
 
-    if (termoBusca) {
-        // ... (mantido) ...
-        const cleanTerm = termoBusca.replace(/[^\w\s]/gi, '');
-        const isCpf = /^\d+$/.test(cleanTerm);
-        
-        if (isCpf && cleanTerm.length > 3) {
-             qFinal = query(qBase, where('cpf', '>=', cleanTerm), where('cpf', '<=', cleanTerm + '\uf8ff'), orderBy('cpf'), limit(ITENS_POR_PAGINA));
-        } else {
-             const termo = termoBusca; 
-             qFinal = query(qBase, orderBy('nome'), startAt(termo), endAt(termo + '\uf8ff'), limit(ITENS_POR_PAGINA));
-        }
+    if (ordem === 'recentes') {
+      qFinal = query(qBase, orderBy('createdAt', 'desc'), limit(ITENS_POR_PAGINA));
     } else {
-        // Listagem padrão
-        if (ordem === 'recentes') {
-            qFinal = query(qBase, orderBy('createdAt', 'desc'), limit(ITENS_POR_PAGINA));
-        } else {
-            qFinal = query(qBase, orderBy('nome'), limit(ITENS_POR_PAGINA));
-        }
+      qFinal = query(qBase, orderBy('nome'), limit(ITENS_POR_PAGINA));
     }
-    
-    // Paginação
-    if (lastDocs.length > 0 && !termoBusca) {
-         const lastDoc = lastDocs[lastDocs.length - 1];
-         qFinal = query(qFinal, startAfter(lastDoc));
+
+    if (lastDocs.length > 0) {
+      const lastDoc = lastDocs[lastDocs.length - 1];
+      qFinal = query(qFinal, startAfter(lastDoc));
     }
 
     const unsub = onSnapshot(qFinal, (snap) => {
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      // Filtro removido daqui pois agora é tratado no EFFECT 1
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       setUsuarios(list);
       setLastVisible(snap.docs[snap.docs.length - 1] || null);
       setLoading(false);
     }, (err) => {
-        console.error("Erro busca usuarios:", err);
-        setLoading(false);
+      console.error('Erro listagem usuarios:', err);
+      setLoading(false);
     });
-    
+
     return () => unsub();
   }, [db, appId, termoBusca, lastDocs, ordem, filtroAlerta, filtroEstrangeiros]);
+
+  // Debounce: busca enquanto digita (mínimo 2 caracteres)
+  useEffect(() => {
+    const trimmed = busca.trim();
+    const effective = trimmed.length >= 2 ? trimmed : '';
+    const timer = setTimeout(() => {
+      if (effective !== termoBusca.trim()) {
+        setTermoBusca(effective);
+        setLastDocs([]);
+        setPaginaBusca(0);
+        setLastVisible(null);
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [busca, termoBusca]);
 
   useEffect(() => {
     let cancelled = false;
@@ -362,24 +510,51 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
 
   // Handle Search Submit
   const handleSearchSubmit = () => {
-      setTermoBusca(busca);
+      const trimmed = busca.trim();
+      setTermoBusca(trimmed);
       setLastDocs([]);
+      setPaginaBusca(0);
+      setLastVisible(null);
+  };
+
+  const limparBusca = () => {
+      setBusca('');
+      setTermoBusca('');
+      setLastDocs([]);
+      setPaginaBusca(0);
       setLastVisible(null);
   };
 
   const handleOrdemChange = (novaOrdem) => {
     setOrdem(novaOrdem);
     setLastDocs([]);
+    setPaginaBusca(0);
     setLastVisible(null);
   };
 
+  const emModoBusca = termoBusca.trim().length >= 2 && !filtroAlerta && !filtroEstrangeiros;
+  const totalResultadosBusca = emModoBusca ? usuarios.length : null;
+  const totalPaginasBusca = emModoBusca
+    ? Math.max(1, Math.ceil(usuarios.length / ITENS_POR_PAGINA))
+    : 1;
+
   const handleNextPage = () => {
+      if (emModoBusca) {
+        if ((paginaBusca + 1) * ITENS_POR_PAGINA < usuarios.length) {
+          setPaginaBusca((p) => p + 1);
+        }
+        return;
+      }
       if (lastVisible) {
           setLastDocs(prev => [...prev, lastVisible]);
       }
   };
 
   const handlePrevPage = () => {
+      if (emModoBusca) {
+        setPaginaBusca((p) => Math.max(0, p - 1));
+        return;
+      }
       setLastDocs(prev => {
           const newStack = [...prev];
           newStack.pop();
@@ -404,6 +579,10 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
     if (filtroUnidade) {
       list = list.filter((u) => String(u.cras_id_principal || '') === String(filtroUnidade));
     }
+    if (emModoBusca) {
+      const start = paginaBusca * ITENS_POR_PAGINA;
+      list = list.slice(start, start + ITENS_POR_PAGINA);
+    }
     return list.map((u) => {
       const obs = obsNaturalidadeById[u.id] || null;
       const nacionalidadeNorm = normalizeNacionalidadePadrao(u.nacionalidade);
@@ -418,7 +597,7 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
         _nomeUnidade: nomeUnidade,
       };
     });
-  }, [usuarios, filtroAlerta, filtroEstrangeiros, filtroUnidade, obsNaturalidadeById, crasMap]);
+  }, [usuarios, filtroAlerta, filtroEstrangeiros, filtroUnidade, obsNaturalidadeById, crasMap, emModoBusca, paginaBusca, ITENS_POR_PAGINA]);
 
   const toggleSelectAllView = () => {
     const ids = usuariosView.map((u) => u.id);
@@ -746,48 +925,405 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
     }
   };
 
+  const removerUsuariosDaLista = (ids) => {
+    const idSet = new Set(ids);
+    setUsuarios((prev) => prev.filter((u) => !idSet.has(u.id)));
+    setSelectedIds((prev) => prev.filter((id) => !idSet.has(id)));
+    setResultadoDuplicados((prev) => {
+      if (!prev) return prev;
+      const filtrarGrupos = (grupos) =>
+        grupos
+          .map((g) => ({ ...g, registros: g.registros.filter((r) => !idSet.has(r.id)) }))
+          .filter((g) => g.registros.length > 1);
+      return {
+        ...prev,
+        porCpf: filtrarGrupos(prev.porCpf),
+        porNome: filtrarGrupos(prev.porNome),
+        porNomeNasc: filtrarGrupos(prev.porNomeNasc),
+      };
+    });
+  };
+
+  const excluirDocumentoCidadao = async (id) => {
+    const ref = doc(db, collectionPath, id);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      throw new Error('Este cadastro já não existe no banco (pode ter sido excluído em outra sessão).');
+    }
+    await deleteDoc(ref);
+    return snap.data();
+  };
+
   const handleDeleteSelected = async () => {
     if (!db || selectedIds.length === 0) return;
     if (!window.confirm(`Deseja realmente excluir ${selectedIds.length} usuário(s)?`)) return;
-    setLoading(true);
+
+    const idsParaExcluir = [...selectedIds];
+    setDeletingIds((prev) => {
+      const next = new Set(prev);
+      idsParaExcluir.forEach((id) => next.add(id));
+      return next;
+    });
+
+    const excluidos = [];
+    const erros = [];
+
     try {
-      for (const id of selectedIds) {
-        await deleteDoc(doc(db, collectionPath, id));
+      for (const id of idsParaExcluir) {
+        try {
+          await excluirDocumentoCidadao(id);
+          excluidos.push(id);
+        } catch (err) {
+          console.error(`Erro ao excluir ${id}:`, err);
+          erros.push({ id, msg: getFriendlyFirebaseError(err, err?.message || 'Erro desconhecido') });
+        }
       }
 
-      await logAdminAction(
-        db, appId, 
-        { uid: userProfile?.uid, email: userProfile?.email, name: userProfile?.nome }, 
-        "DELETE_CIDADAOS_MASS", 
-        `Exclusão em massa: ${selectedIds.length} usuários`, 
-        { count: selectedIds.length, ids: selectedIds }
-      );
+      if (excluidos.length > 0) {
+        removerUsuariosDaLista(excluidos);
+        updateTotals();
+        await logAdminAction(
+          db, appId,
+          { uid: userProfile?.uid, email: userProfile?.email, name: userProfile?.nome, role: userProfile?.role },
+          'DELETE_CIDADAOS_MASS',
+          `Exclusão em massa: ${excluidos.length} usuários`,
+          { count: excluidos.length, ids: excluidos }
+        );
+      }
 
-      setSelectedIds([]);
+      if (erros.length === 0) {
+        alert(`${excluidos.length} usuário(s) excluído(s) com sucesso.`);
+      } else if (excluidos.length > 0) {
+        alert(`${excluidos.length} excluído(s). ${erros.length} falhou(aram):\n${erros.map((e) => e.id).join(', ')}`);
+      } else {
+        alert(`Nenhum usuário foi excluído.\n${erros[0]?.msg || 'Verifique suas permissões de administrador.'}`);
+      }
     } finally {
-      setLoading(false);
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        idsParaExcluir.forEach((id) => next.delete(id));
+        return next;
+      });
     }
   };
 
-  const handleDeleteOne = async (id) => {
+  const handleDeleteOne = async (id, nomeExibicao = '') => {
     if (!db || !id) return;
-    if (!window.confirm("Deseja realmente excluir este usuário?")) return;
-    setLoading(true);
+    const rotulo = nomeExibicao || id;
+    if (!window.confirm(`Deseja realmente excluir o usuário "${rotulo}"?`)) return;
+
+    setDeletingIds((prev) => new Set(prev).add(id));
     try {
-      await deleteDoc(doc(db, collectionPath, id));
+      await excluirDocumentoCidadao(id);
+      removerUsuariosDaLista([id]);
+      updateTotals();
 
       await logAdminAction(
-        db, appId, 
-        { uid: userProfile?.uid, email: userProfile?.email, name: userProfile?.nome }, 
-        "DELETE_CIDADAO", 
-        `Usuário excluído`, 
-        { id }
+        db, appId,
+        { uid: userProfile?.uid, email: userProfile?.email, name: userProfile?.nome, role: userProfile?.role },
+        'DELETE_CIDADAO',
+        `Usuário excluído: ${rotulo}`,
+        { id, nome: nomeExibicao || null }
       );
     } catch (err) {
-      console.error("Erro ao excluir usuário:", err);
-      alert("Erro ao excluir usuário.");
+      console.error('Erro ao excluir usuário:', err);
+      const msg = getFriendlyFirebaseError(
+        err,
+        'Não foi possível excluir. Verifique se você tem perfil de Coordenador ou Superintendente.'
+      );
+      alert(msg);
     } finally {
-      setLoading(false);
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  const buscarInfoAtendimentosRegistro = async (registro) => {
+    const atendPath = `artifacts/${appId}/public/data/atendimentos`;
+    const variants = variantesCpfBusca(registro);
+    const idsVistos = new Set();
+    let total = 0;
+    let comObs = 0;
+    let ultimaObs = '';
+    let ultimaObsMs = 0;
+
+    for (const variant of variants) {
+      try {
+        const snap = await getDocs(
+          query(collection(db, atendPath), where('cidadao.cpf', '==', variant), limit(40))
+        );
+        snap.docs.forEach((d) => {
+          if (idsVistos.has(d.id)) return;
+          idsVistos.add(d.id);
+          const data = d.data() || {};
+          total += 1;
+          const obs = String(data.observacoes || '').trim();
+          if (obs) {
+            comObs += 1;
+            const ms = getMillisValor(data.hora_fim || data.hora_chegada);
+            if (ms >= ultimaObsMs) {
+              ultimaObsMs = ms;
+              ultimaObs = obs.length > 180 ? `${obs.slice(0, 180)}…` : obs;
+            }
+          }
+        });
+      } catch (e) {
+        console.warn('[duplicados] atendimentos', variant, e);
+      }
+    }
+
+    return { total, comObs, ultimaObs, ultimaObsData: ultimaObsMs ? new Date(ultimaObsMs).toLocaleString('pt-BR') : '' };
+  };
+
+  const enriquecerGruposDuplicados = async (grupos) => {
+    const cacheAtend = new Map();
+    const enriquecerRegistro = async (reg) => {
+      const cacheKey = reg.id;
+      if (!cacheAtend.has(cacheKey)) {
+        cacheAtend.set(cacheKey, await buscarInfoAtendimentosRegistro(reg));
+      }
+      const atendInfo = cacheAtend.get(cacheKey);
+      return { ...reg, _info: montarInfoRegistro(reg, atendInfo) };
+    };
+
+    const out = [];
+    for (const grupo of grupos) {
+      const registros = [];
+      for (const reg of grupo.registros) {
+        registros.push(await enriquecerRegistro(reg));
+      }
+      registros.sort((a, b) => (b._info?.pontuacao || 0) - (a._info?.pontuacao || 0));
+      const principalSugerido = registros[0]?.id || '';
+      out.push({ ...grupo, registros, principalSugerido });
+    }
+    return out;
+  };
+
+  const vasculharDuplicados = async () => {
+    if (!db) return;
+    setScanningDuplicados(true);
+    setResultadoDuplicados(null);
+    try {
+      const todos = [];
+      let lastDoc = null;
+      while (todos.length < BUSCA_MAX_DOCS) {
+        let qLote = query(collection(db, collectionPath), orderBy('nome'), limit(BUSCA_LOTE));
+        if (lastDoc) qLote = query(qLote, startAfter(lastDoc));
+        const snap = await getDocs(qLote);
+        if (snap.empty) break;
+        snap.docs.forEach((d) => todos.push({ id: d.id, ...d.data() }));
+        lastDoc = snap.docs[snap.docs.length - 1];
+        if (snap.docs.length < BUSCA_LOTE) break;
+      }
+
+      const mapCpf = new Map();
+      const mapNome = new Map();
+      const mapNomeNasc = new Map();
+
+      todos.forEach((u) => {
+        const cpf = String(u.cpf || '').replace(/\D/g, '');
+        const cpfId = String(u.id || '').replace(/\D/g, '');
+        const cpfFinal = cpf.length === 11 ? cpf : (cpfId.length === 11 ? cpfId : '');
+        if (cpfFinal) {
+          if (!mapCpf.has(cpfFinal)) mapCpf.set(cpfFinal, []);
+          mapCpf.get(cpfFinal).push(u);
+        }
+
+        const nomeKey = simplify(String(u.nome || '').trim());
+        if (nomeKey.length >= 3) {
+          if (!mapNome.has(nomeKey)) mapNome.set(nomeKey, []);
+          mapNome.get(nomeKey).push(u);
+        }
+
+        const nasc = normalizeDate(String(u.dataNascimento || '').trim());
+        if (nomeKey.length >= 3 && nasc) {
+          const combo = `${nomeKey}|${nasc}`;
+          if (!mapNomeNasc.has(combo)) mapNomeNasc.set(combo, []);
+          mapNomeNasc.get(combo).push(u);
+        }
+      });
+
+      const mapGrupos = (mapa, tipo) =>
+        [...mapa.entries()]
+          .filter(([, arr]) => arr.length > 1)
+          .map(([chave, registros]) => ({ tipo, chave, registros }))
+          .sort((a, b) => b.registros.length - a.registros.length);
+
+      const porCpfRaw = mapGrupos(mapCpf, 'cpf');
+      const porNomeRaw = mapGrupos(mapNome, 'nome');
+      const porNomeNascRaw = mapGrupos(mapNomeNasc, 'nome_nasc');
+
+      const [porCpf, porNome, porNomeNasc] = await Promise.all([
+        enriquecerGruposDuplicados(porCpfRaw),
+        enriquecerGruposDuplicados(porNomeRaw),
+        enriquecerGruposDuplicados(porNomeNascRaw),
+      ]);
+
+      setResultadoDuplicados({
+        totalAnalisados: todos.length,
+        porCpf,
+        porNome,
+        porNomeNasc,
+      });
+    } catch (err) {
+      console.error('Erro ao vasculhar duplicados:', err);
+      alert(getFriendlyFirebaseError(err, 'Erro ao analisar duplicados.'));
+    } finally {
+      setScanningDuplicados(false);
+    }
+  };
+
+  const mesclarDadosCidadao = (principal, secundarios) => {
+    const merged = { ...principal };
+    const chavesIgnorar = new Set(['id', 'createdAt', 'importadoEm', 'origemImportacao']);
+
+    secundarios.forEach((sec) => {
+      Object.entries(sec).forEach(([key, val]) => {
+        if (chavesIgnorar.has(key) || key.startsWith('_')) return;
+        const atual = merged[key];
+
+        if (!temConteudoValor(atual) && temConteudoValor(val)) {
+          merged[key] = val;
+          return;
+        }
+
+        if (Array.isArray(atual) && Array.isArray(val)) {
+          merged[key] = [...new Set([...atual, ...val])];
+          return;
+        }
+
+        if (temConteudoValor(val) && temConteudoValor(atual)) {
+          if (getMillisValor(val) > getMillisValor(atual)) {
+            merged[key] = val;
+          } else if (typeof val === 'string' && typeof atual === 'string' && val.length > atual.length) {
+            merged[key] = val;
+          }
+        }
+      });
+    });
+
+    const cpfLimpo = String(merged.cpf || merged.id || '').replace(/\D/g, '');
+    if (cpfLimpo.length === 11) merged.cpf = formatCpf(cpfLimpo);
+    if (merged.nome) merged.nome = normalizeName(merged.nome);
+    if (merged.nomeSocial) merged.nomeSocial = normalizeName(merged.nomeSocial);
+    merged.unificado_em = serverTimestamp();
+    merged.unificado_de_ids = secundarios.map((s) => s.id);
+
+    return merged;
+  };
+
+  const migrarAtendimentosParaCpf = async (registrosOrigem, registroDestino) => {
+    const atendPath = `artifacts/${appId}/public/data/atendimentos`;
+    const cpfDestino = String(registroDestino.cpf || '').replace(/\D/g, '');
+    const cpfDestinoFmt = cpfDestino.length === 11 ? formatCpf(cpfDestino) : String(registroDestino.cpf || registroDestino.id || '');
+    const idsAtendAtualizados = new Set();
+
+    for (const origem of registrosOrigem) {
+      const variants = variantesCpfBusca(origem);
+      for (const variant of variants) {
+        try {
+          const snap = await getDocs(
+            query(collection(db, atendPath), where('cidadao.cpf', '==', variant), limit(100))
+          );
+          let batch = writeBatch(db);
+          let ops = 0;
+
+          for (const d of snap.docs) {
+            if (idsAtendAtualizados.has(d.id)) continue;
+            idsAtendAtualizados.add(d.id);
+            const data = d.data() || {};
+            const cid = { ...(data.cidadao || {}) };
+            cid.cpf = cpfDestinoFmt;
+            if (!cid.nome && registroDestino.nome) cid.nome = registroDestino.nome;
+            if (!cid.nomeSocial && registroDestino.nomeSocial) cid.nomeSocial = registroDestino.nomeSocial;
+            batch.update(d.ref, {
+              cidadao: cid,
+              nome_exibicao: normalizeName(registroDestino.nomeSocial || registroDestino.nome || data.nome_exibicao || ''),
+            });
+            ops += 1;
+            if (ops >= 400) {
+              await batch.commit();
+              batch = writeBatch(db);
+              ops = 0;
+            }
+          }
+          if (ops > 0) await batch.commit();
+        } catch (e) {
+          console.warn('[unificar] migrar atendimentos', variant, e);
+        }
+      }
+    }
+
+    return idsAtendAtualizados.size;
+  };
+
+  const unificarCadastros = async (idPrincipal, idsSecundarios, rotuloGrupo = '') => {
+    if (!db || !idPrincipal || !idsSecundarios?.length) return;
+    const secundarios = idsSecundarios.filter((id) => id && id !== idPrincipal);
+    if (!secundarios.length) {
+      alert('Selecione ao menos um cadastro secundário diferente do principal.');
+      return;
+    }
+
+    if (!window.confirm(
+      `Unificar ${secundarios.length} cadastro(s) no principal?\n\n` +
+      `• Os dados (ficha, observações, encaminhamentos) serão mesclados no cadastro mantido.\n` +
+      `• Atendimentos antigos serão vinculados ao CPF principal.\n` +
+      `• Os cadastros duplicados serão excluídos.\n\n` +
+      (rotuloGrupo ? `Grupo: ${rotuloGrupo}` : '')
+    )) return;
+
+    setUnificandoGrupo(true);
+    try {
+      const snapPrincipal = await getDoc(doc(db, collectionPath, idPrincipal));
+      if (!snapPrincipal.exists()) throw new Error('Cadastro principal não encontrado.');
+
+      const principal = { id: snapPrincipal.id, ...snapPrincipal.data() };
+      const docsSecundarios = [];
+      for (const id of secundarios) {
+        const snap = await getDoc(doc(db, collectionPath, id));
+        if (snap.exists()) docsSecundarios.push({ id: snap.id, ...snap.data() });
+      }
+      if (!docsSecundarios.length) throw new Error('Nenhum cadastro secundário encontrado.');
+
+      const cpfLimpo = String(principal.cpf || principal.id || '').replace(/\D/g, '');
+      const idDestino = cpfLimpo.length === 11 ? cpfLimpo : idPrincipal;
+      const payload = mesclarDadosCidadao(principal, docsSecundarios);
+      delete payload.id;
+
+      const atendMigrados = await migrarAtendimentosParaCpf(docsSecundarios, payload);
+
+      await setDoc(doc(db, collectionPath, idDestino), payload, { merge: true });
+
+      for (const sec of docsSecundarios) {
+        if (sec.id !== idDestino) {
+          await deleteDoc(doc(db, collectionPath, sec.id));
+        }
+      }
+      if (idPrincipal !== idDestino) {
+        await deleteDoc(doc(db, collectionPath, idPrincipal));
+      }
+
+      removerUsuariosDaLista([...secundarios, ...(idPrincipal !== idDestino ? [idPrincipal] : [])]);
+      updateTotals();
+
+      await logAdminAction(
+        db, appId,
+        { uid: userProfile?.uid, email: userProfile?.email, name: userProfile?.nome, role: userProfile?.role },
+        'UNIFICAR_CIDADAOS',
+        `Cadastros unificados em ${idDestino}`,
+        { idDestino, idPrincipal, secundarios, atendMigrados }
+      );
+
+      alert(`Unificação concluída.\nCadastro mantido: ${idDestino}\nAtendimentos reassociados: ${atendMigrados}`);
+    } catch (err) {
+      console.error('Erro ao unificar cadastros:', err);
+      alert(getFriendlyFirebaseError(err, 'Erro ao unificar cadastros.'));
+    } finally {
+      setUnificandoGrupo(false);
     }
   };
 
@@ -1712,6 +2248,11 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
     setFiltroEstrangeiros,
     setFiltroUnidade,
     handleSearchSubmit,
+    limparBusca,
+    emModoBusca,
+    totalResultadosBusca,
+    totalPaginasBusca,
+    paginaBusca,
     handleOrdemChange,
     handleNextPage,
     handlePrevPage,
@@ -1719,6 +2260,13 @@ export const useGerenciarUsuarios = ({ db, appId, userProfile }) => {
     toggleSelectAllView,
     handleDeleteSelected,
     handleDeleteOne,
+    deletingIds,
+    scanningDuplicados,
+    unificandoGrupo,
+    resultadoDuplicados,
+    setResultadoDuplicados,
+    vasculharDuplicados,
+    unificarCadastros,
     handleCreateChange,
     cancelCreate,
     saveCreate,

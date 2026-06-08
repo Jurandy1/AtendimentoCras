@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
-import { AlertTriangle, Edit, Trash2, Plus, Settings, ChevronDown, Filter, RefreshCw, UserCheck, ShieldAlert, Columns, UploadCloud, Building } from 'lucide-react';
+import { AlertTriangle, Edit, Trash2, Plus, Settings, ChevronDown, Filter, RefreshCw, UserCheck, ShieldAlert, Columns, UploadCloud, Building, Search, X, Copy, FileText, Merge, Shield } from 'lucide-react';
 import { normalizeDate } from '../../utils/helpers';
 import { useGerenciarUsuarios } from '../../hooks/useGerenciarUsuarios';
+
+const grupoKey = (titulo, grupo) => `${titulo}::${grupo.chave}`;
 
 const GerenciarUsuarios = ({ db, appId, userProfile }) => {
   const [showTools, setShowTools] = useState(false);
   const [showColumnSelector, setShowColumnSelector] = useState(false);
+  const [principalPorGrupo, setPrincipalPorGrupo] = useState({});
 
   const {
     usuarios,
@@ -39,6 +42,11 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
     setFiltroEstrangeiros,
     setFiltroUnidade,
     handleSearchSubmit,
+    limparBusca,
+    emModoBusca,
+    totalResultadosBusca,
+    totalPaginasBusca,
+    paginaBusca,
     handleOrdemChange,
     handleNextPage,
     handlePrevPage,
@@ -46,6 +54,13 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
     toggleSelectAllView,
     handleDeleteSelected,
     handleDeleteOne,
+    deletingIds,
+    scanningDuplicados,
+    unificandoGrupo,
+    resultadoDuplicados,
+    setResultadoDuplicados,
+    vasculharDuplicados,
+    unificarCadastros,
     handleCreateChange,
     cancelCreate,
     saveCreate,
@@ -185,15 +200,175 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
   const allSelectedOnView =
     usuariosView.length > 0 && usuariosView.every((u) => selectedIds.includes(u.id));
 
+  const podeAvancarPagina = emModoBusca
+    ? (paginaBusca + 1) * ITENS_POR_PAGINA < (totalResultadosBusca || 0)
+    : !!(lastVisible && usuarios.length >= ITENS_POR_PAGINA);
+  const podeVoltarPagina = emModoBusca ? paginaBusca > 0 : lastDocs.length > 0;
+  const paginaAtual = emModoBusca ? paginaBusca + 1 : lastDocs.length + 1;
+
+  const getPrincipalGrupo = (titulo, grupo) => {
+    const key = grupoKey(titulo, grupo);
+    return principalPorGrupo[key] || grupo.principalSugerido || grupo.registros[0]?.id || '';
+  };
+
+  const setPrincipalGrupo = (titulo, grupo, id) => {
+    const key = grupoKey(titulo, grupo);
+    setPrincipalPorGrupo((prev) => ({ ...prev, [key]: id }));
+  };
+
+  const renderInfoTecnica = (reg) => {
+    const info = reg._info;
+    if (!info) return null;
+    return (
+      <div className="mt-2 space-y-1.5">
+        <div className="flex flex-wrap gap-1">
+          {info.temDadosTecnicos ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+              <FileText size={10} /> Com ficha / dados técnicos
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-gray-100 text-gray-600">
+              Sem ficha técnica
+            </span>
+          )}
+          {info.qtdComObs > 0 && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-800 border border-blue-200">
+              {info.qtdComObs} atend. com observação
+            </span>
+          )}
+          {info.qtdAtendimentos > 0 && (
+            <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-100 text-slate-700">
+              {info.qtdAtendimentos} atendimento(s) no histórico
+            </span>
+          )}
+          {info.seguroExcluir && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-green-50 text-green-700 border border-green-200">
+              <Shield size={10} /> Pode excluir com mais segurança
+            </span>
+          )}
+        </div>
+        {info.indicadores?.length > 0 && (
+          <p className="text-[11px] text-amber-800">
+            <span className="font-semibold">Ficha:</span> {info.indicadores.join(' · ')}
+          </p>
+        )}
+        {info.ultimaObs && (
+          <p className="text-[11px] text-gray-600 bg-gray-50 border border-gray-200 rounded px-2 py-1">
+            <span className="font-semibold text-gray-700">Última observação{info.ultimaObsData ? ` (${info.ultimaObsData})` : ''}:</span>{' '}
+            {info.ultimaObs}
+            {info.ultimoAtendente ? ` — ${info.ultimoAtendente}` : ''}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  const renderGrupoDuplicados = (titulo, grupos, fmtChave) => (
+    <section key={titulo}>
+      <h5 className="text-sm font-bold text-gray-800 mb-2 uppercase tracking-wide">{titulo}</h5>
+      {grupos.length === 0 ? (
+        <p className="text-sm text-gray-500 italic">Nenhum duplicado neste critério.</p>
+      ) : (
+        <div className="space-y-3">
+          {grupos.slice(0, 30).map((grupo) => {
+            const key = grupoKey(titulo, grupo);
+            const principalId = getPrincipalGrupo(titulo, grupo);
+            const secundarios = grupo.registros.map((r) => r.id).filter((id) => id !== principalId);
+            return (
+              <div key={key} className="border border-violet-200 rounded-lg bg-violet-50/40 p-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                  <p className="text-sm font-semibold text-violet-900">
+                    {fmtChave(grupo)} <span className="text-violet-600 font-normal">({grupo.registros.length} registros)</span>
+                  </p>
+                  <button
+                    type="button"
+                    disabled={unificandoGrupo || secundarios.length === 0}
+                    onClick={() => unificarCadastros(principalId, secundarios, fmtChave(grupo))}
+                    className="shrink-0 px-3 py-1.5 bg-violet-700 text-white rounded-lg text-xs hover:bg-violet-800 disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    <Merge size={12} />
+                    {unificandoGrupo ? 'Unificando...' : 'Unificar neste principal'}
+                  </button>
+                </div>
+                <p className="text-[11px] text-violet-800 mb-2">
+                  Marque qual cadastro <strong>manter</strong>. O sugerido (⭐) tem mais ficha técnica e observações.
+                </p>
+                <div className="space-y-2">
+                  {grupo.registros.map((reg) => {
+                    const isPrincipal = reg.id === principalId;
+                    const isSugerido = reg.id === grupo.principalSugerido;
+                    return (
+                      <div
+                        key={reg.id}
+                        className={`rounded-lg border p-2 text-sm ${isPrincipal ? 'bg-violet-100 border-violet-400 ring-1 ring-violet-300' : 'bg-white border-gray-200'}`}
+                      >
+                        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-2">
+                          <div className="flex gap-2 min-w-0 flex-1">
+                            <input
+                              type="radio"
+                              name={`principal-${key}`}
+                              checked={isPrincipal}
+                              onChange={() => setPrincipalGrupo(titulo, grupo, reg.id)}
+                              className="mt-1 shrink-0"
+                              title="Manter este cadastro"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <p className="font-medium text-gray-800 break-words">
+                                {safeVal(reg.nome)}
+                                {isSugerido && <span className="ml-1 text-amber-600" title="Sugerido pelo sistema">⭐</span>}
+                                {isPrincipal && <span className="ml-2 text-[10px] font-bold uppercase text-violet-700">Principal</span>}
+                              </p>
+                              <p className="text-xs text-gray-500">
+                                ID: {reg.id} · CPF: {safeVal(reg.cpf) || '—'} · Nasc.: {normalizeDate(safeVal(reg.dataNascimento)) || '—'}
+                              </p>
+                              <p className="text-xs text-gray-500">
+                                Mãe: {safeVal(reg.nomeMae) || '—'} · {getTipoCadastro(reg)}
+                                {reg._info?.pontuacao != null && ` · Pontuação: ${reg._info.pontuacao}`}
+                              </p>
+                              {renderInfoTecnica(reg)}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!reg._info?.seguroExcluir) {
+                                if (!window.confirm(
+                                  'Este cadastro tem ficha técnica e/ou observações de atendimento.\n\nTem certeza que deseja EXCLUIR em vez de unificar?'
+                                )) return;
+                              }
+                              handleDeleteOne(reg.id, reg.nome);
+                            }}
+                            disabled={deletingIds.has(reg.id) || isPrincipal}
+                            className="shrink-0 px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-xs hover:bg-red-100 disabled:opacity-50"
+                            title={isPrincipal ? 'Não exclua o principal — unifique os outros nele' : 'Excluir só este registro'}
+                          >
+                            {deletingIds.has(reg.id) ? 'Excluindo...' : 'Excluir'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+          {grupos.length > 30 && (
+            <p className="text-xs text-gray-500">Mostrando os 30 primeiros grupos de {grupos.length}.</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+
   return (
-    <div className="p-4">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
-        <div>
-          <h3 className="text-2xl font-semibold">Usuários cadastrados</h3>
+    <div className="p-3 sm:p-4 max-w-full overflow-x-hidden">
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
+        <div className="min-w-0 flex-1">
+          <h3 className="text-xl sm:text-2xl font-semibold">Usuários cadastrados</h3>
           <p className="text-sm text-gray-600 mb-2">
             Inclui usuários importados de planilha e cadastrados manualmente na recepção.
           </p>
-          <div className="flex gap-3 text-xs">
+          <div className="flex flex-wrap gap-2 text-xs">
              <div className="px-3 py-1 bg-gray-100 rounded-lg border border-gray-200 shadow-sm flex items-center gap-2">
                 <span className="font-semibold text-gray-700">Total:</span> 
                 <span className="text-gray-900 font-bold text-sm">{totalUsuarios}</span>
@@ -214,32 +389,66 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
              </div>
           </div>
         </div>
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 w-full lg:max-w-3xl">
           
           {/* Barra Superior: Busca e Ações Principais */}
-          <div className="flex flex-col lg:flex-row gap-3 justify-between items-start lg:items-center bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
-            <div className="flex flex-col sm:flex-row gap-2 w-full lg:w-auto flex-1">
-              <input
-                value={busca}
-                onChange={(e) => setBusca(e.target.value)}
-                onBlur={handleSearchSubmit}
-                onKeyDown={(e) => e.key === 'Enter' && handleSearchSubmit()}
-                placeholder="Buscar por nome, CPF ou mãe (Enter)"
-                className="px-3 py-2 border rounded-lg text-sm flex-1 min-w-[200px]"
-              />
+          <div className="flex flex-col gap-3 bg-white p-3 sm:p-4 rounded-lg border border-gray-200 shadow-sm">
+            <div className="flex flex-col gap-2 w-full">
+              <div className="relative flex gap-2">
+                <div className="relative flex-1 min-w-0">
+                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <input
+                    value={busca}
+                    onChange={(e) => setBusca(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSearchSubmit()}
+                    placeholder="Nome, nome social, CPF ou nome da mãe..."
+                    className="w-full pl-9 pr-9 py-2.5 border rounded-lg text-sm"
+                  />
+                  {busca && (
+                    <button
+                      type="button"
+                      onClick={limparBusca}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
+                      title="Limpar busca"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSearchSubmit}
+                  className="px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 shrink-0"
+                >
+                  Buscar
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-500">
+                Digite ao menos 2 caracteres. Busca em nome, nome social, mãe ou CPF — sem acento e sem diferenciar maiúsculas.
+              </p>
+              {emModoBusca && !loading && (
+                <p className="text-xs font-medium text-blue-700">
+                  {totalResultadosBusca === 0
+                    ? 'Nenhum usuário encontrado para essa busca.'
+                    : `${totalResultadosBusca} usuário(s) encontrado(s)`}
+                </p>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
               <select 
                  value={ordem} 
                  onChange={(e) => handleOrdemChange(e.target.value)}
-                 className="px-3 py-2 border rounded-lg text-sm bg-gray-50"
+                 disabled={emModoBusca}
+                 className="px-3 py-2 border rounded-lg text-sm bg-gray-50 w-full disabled:opacity-60"
                  title="Ordem de exibição"
               >
-                 <option value="alfabetica">A-Z</option>
-                 <option value="recentes">Recentes</option>
+                 <option value="alfabetica">Ordem: A-Z</option>
+                 <option value="recentes">Ordem: Recentes</option>
               </select>
               <select
                 value={filtroUnidade}
                 onChange={(e) => setFiltroUnidade(e.target.value)}
-                className="px-3 py-2 border rounded-lg text-sm bg-gray-50"
+                className="px-3 py-2 border rounded-lg text-sm bg-gray-50 w-full"
               >
                 <option value="">Todas as unidades</option>
                 {Object.entries(crasMap || {}).map(([id, nome]) => (
@@ -250,7 +459,7 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
               </select>
             </div>
 
-            <div className="flex flex-wrap gap-2 w-full lg:w-auto justify-end">
+            <div className="flex flex-wrap gap-2 w-full justify-start sm:justify-end">
                <button
                 onClick={() => setCreating(true)}
                 className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 flex items-center gap-2 shadow-sm whitespace-nowrap"
@@ -326,6 +535,15 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
                       >
                         <Filter size={14} />
                         {filtroEstrangeiros ? 'Mostrar Todos' : 'Filtrar Estrangeiros'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setShowTools(false); vasculharDuplicados(); }}
+                        disabled={scanningDuplicados || loading}
+                        className="w-full text-left px-3 py-2 rounded-md text-sm hover:bg-violet-50 text-violet-800 flex items-center gap-2 disabled:opacity-50"
+                      >
+                        <Copy size={14} />
+                        {scanningDuplicados ? 'Analisando duplicados...' : 'Vasculhar duplicados'}
                       </button>
                     </div>
 
@@ -454,8 +672,8 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
         </div>
       )}
 
-      {/* Mobile View (Cards) */}
-      <div className="md:hidden space-y-4 mb-4">
+      {/* Mobile / Tablet View (Cards) */}
+      <div className="xl:hidden space-y-3 mb-4">
         {loading && (
           <div className="text-center text-gray-500 animate-pulse py-8">Carregando usuários...</div>
         )}
@@ -473,8 +691,11 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
                     className="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                   />
                   <div>
-                    <h4 className="font-bold text-gray-800">{safeVal(u.nome)}</h4>
-                    <div className="text-sm text-gray-500 flex items-center gap-2">
+                    <h4 className="font-bold text-gray-800 break-words">{safeVal(u.nome)}</h4>
+                    {u.nomeSocial && (
+                      <p className="text-xs text-blue-600 break-words">Social: {safeVal(u.nomeSocial)}</p>
+                    )}
+                    <div className="text-sm text-gray-500 flex flex-wrap items-center gap-2">
                        <span>CPF: {safeVal(u.cpf)}</span>
                        {u._alertaCPF && <AlertTriangle size={12} className="text-red-500" />}
                     </div>
@@ -510,9 +731,10 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
                </button>
                <button 
                   onClick={() => handleDeleteOne(u.id, u.nome)} 
-                  className="px-3 py-1.5 bg-red-50 text-red-700 rounded hover:bg-red-100 text-sm font-medium flex items-center gap-1"
+                  disabled={deletingIds.has(u.id)}
+                  className="px-3 py-1.5 bg-red-50 text-red-700 rounded hover:bg-red-100 text-sm font-medium flex items-center gap-1 disabled:opacity-50"
                 >
-                  <Trash2 size={14} /> Excluir
+                  <Trash2 size={14} /> {deletingIds.has(u.id) ? 'Excluindo...' : 'Excluir'}
                </button>
             </div>
           </div>
@@ -520,8 +742,8 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
       </div>
 
       {/* Desktop View (Table) */}
-      <div className="hidden md:block bg-white shadow rounded-lg overflow-x-auto border border-gray-200">
-        <table className="w-full min-w-[1800px] text-xs divide-y divide-gray-200">
+      <div className="hidden xl:block bg-white shadow rounded-lg overflow-x-auto border border-gray-200 max-w-full">
+        <table className="w-full min-w-[1100px] text-xs divide-y divide-gray-200">
           <thead className="bg-gray-50">
             {/* Linha de Cabeçalhos */}
             <tr>
@@ -600,8 +822,9 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
                         <Edit size={14} />
                     </button>
                     <button
-                        onClick={() => handleDeleteOne(u.id)}
-                        className="text-red-600 hover:text-red-900 transition-colors"
+                        onClick={() => handleDeleteOne(u.id, u.nome)}
+                        disabled={deletingIds.has(u.id)}
+                        className="text-red-600 hover:text-red-900 transition-colors disabled:opacity-40"
                         title="Excluir"
                     >
                         <Trash2 size={14} />
@@ -615,26 +838,29 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
       </div>
 
       {!loading && (
-        <div className="flex flex-col md:flex-row items-center justify-between gap-2 mt-3 text-xs text-gray-600">
-          <div>
-            {/* Mostrando paginação simples server-side */}
-            {usuariosView.length > 0 ? `Mostrando ${usuariosView.length} resultados nesta página` : ''}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mt-3 text-xs text-gray-600">
+          <div className="text-center sm:text-left">
+            {usuariosView.length > 0 ? (
+              emModoBusca
+                ? `Exibindo ${usuariosView.length} de ${totalResultadosBusca} encontrado(s)`
+                : `Mostrando ${usuariosView.length} nesta página`
+            ) : emModoBusca ? 'Nenhum resultado para esta busca.' : ''}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
             <button
               onClick={handlePrevPage}
-              disabled={lastDocs.length === 0}
-              className={`px-2 py-1 rounded border ${lastDocs.length === 0 ? 'bg-gray-100 text-gray-400 border-gray-200' : 'bg-white hover:bg-gray-100'}`}
+              disabled={!podeVoltarPagina}
+              className={`px-3 py-1.5 rounded-lg border text-sm ${!podeVoltarPagina ? 'bg-gray-100 text-gray-400 border-gray-200' : 'bg-white hover:bg-gray-100'}`}
             >
               Anterior
             </button>
-            <span className="px-2">
-               Página {lastDocs.length + 1}
+            <span className="px-2 font-medium">
+               Página {paginaAtual}{emModoBusca ? ` de ${totalPaginasBusca}` : ''}
             </span>
             <button
               onClick={handleNextPage}
-              disabled={!lastVisible || usuarios.length < ITENS_POR_PAGINA}
-              className={`px-2 py-1 rounded border ${(!lastVisible || usuarios.length < ITENS_POR_PAGINA) ? 'bg-gray-100 text-gray-400 border-gray-200' : 'bg-white hover:bg-gray-100'}`}
+              disabled={!podeAvancarPagina}
+              className={`px-3 py-1.5 rounded-lg border text-sm ${!podeAvancarPagina ? 'bg-gray-100 text-gray-400 border-gray-200' : 'bg-white hover:bg-gray-100'}`}
             >
               Próxima
             </button>
@@ -910,6 +1136,66 @@ const GerenciarUsuarios = ({ db, appId, userProfile }) => {
                 <button type="submit" className="px-4 py-2 rounded-lg bg-blue-600 text-white">Salvar alterações</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {resultadoDuplicados && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+            <div className="p-4 border-b flex justify-between items-start gap-3">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-900">Duplicados encontrados</h4>
+                <p className="text-sm text-gray-500 mt-1">
+                  Analisados {resultadoDuplicados.totalAnalisados} cadastros.
+                  {' '}{resultadoDuplicados.porCpf.length} grupo(s) por CPF,{' '}
+                  {resultadoDuplicados.porNome.length} por nome,{' '}
+                  {resultadoDuplicados.porNomeNasc.length} por nome + nascimento.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResultadoDuplicados(null)}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              <p className="text-xs text-gray-600 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                Cadastros com <strong>ficha técnica</strong> ou <strong>observações de atendimento</strong> estão destacados.
+                Prefira <strong>unificar</strong> em vez de excluir para não perder histórico do técnico.
+              </p>
+              {renderGrupoDuplicados(
+                'Mesmo CPF',
+                resultadoDuplicados.porCpf,
+                (g) => g.chave.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4')
+              )}
+              {renderGrupoDuplicados(
+                'Mesmo nome',
+                resultadoDuplicados.porNome,
+                (g) => g.registros[0]?.nome || g.chave
+              )}
+              {renderGrupoDuplicados(
+                'Mesmo nome + data de nascimento',
+                resultadoDuplicados.porNomeNasc,
+                (g) => {
+                  const [nome, nasc] = g.chave.split('|');
+                  return `${g.registros[0]?.nome || nome} — ${nasc}`;
+                }
+              )}
+            </div>
+
+            <div className="p-4 border-t flex justify-end">
+              <button
+                type="button"
+                onClick={() => setResultadoDuplicados(null)}
+                className="px-4 py-2 rounded-lg bg-gray-200 text-gray-700 text-sm"
+              >
+                Fechar
+              </button>
+            </div>
           </div>
         </div>
       )}
