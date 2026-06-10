@@ -364,6 +364,36 @@ const anunciarChamada = (registro, nomePrincipal) => {
 };
 
 const SOM_ATIVO_KEY = "painel_tv_som_desbloqueado";
+const ULTIMO_ANUNCIO_KEY = "painel_tv_ultimo_anuncio";
+
+const inicioHojeMs = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+};
+
+const hojeDateString = () => new Date().toDateString();
+
+const lerUltimoAnuncioPersistido = () => {
+  try {
+    const raw = window.localStorage.getItem(ULTIMO_ANUNCIO_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.date !== hojeDateString()) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const persistirUltimoAnuncio = (id, ts) => {
+  try {
+    window.localStorage.setItem(
+      ULTIMO_ANUNCIO_KEY,
+      JSON.stringify({ id, ts, date: hojeDateString() })
+    );
+  } catch {}
+};
 
 // ─────────────────────────────────────────────────────────────────
 // PAINEL DE DIAGNÓSTICO
@@ -527,7 +557,11 @@ function PainelTVPage({
   const atendentesMap = useMemo(() => new Map((atendentesList || []).map((a) => [a.id, a])), [atendentesList]);
   const salasMap = useMemo(() => new Map((salasAtendimento || []).map((s) => [s.id, s])), [salasAtendimento]);
 
-  const lastChamadoRef = useRef({ id: null, ts: null });
+  const persisted = typeof window !== "undefined" ? lerUltimoAnuncioPersistido() : null;
+  const lastChamadoRef = useRef({
+    id: persisted?.id ?? null,
+    ts: persisted?.ts ?? null,
+  });
   const pendingTimeoutsRef = useRef(new Set());
   const somAtivoRef = useRef(somAtivo);
   const chamandoRawRef = useRef(null);
@@ -756,8 +790,20 @@ function PainelTVPage({
       return 0;
     };
 
+    const ehChamadaDeHoje = (registro) => {
+      if (!registro) return false;
+      const start = inicioHojeMs();
+      const hc = getMillis(registro.hora_chamada);
+      if (hc >= start) return true;
+      const hIni = getMillis(registro.hora_inicio);
+      if (hIni >= start) return true;
+      const hCheg = getMillis(registro.hora_chegada);
+      return hCheg >= start;
+    };
+
     const deveIgnorarChamada = (registro) => {
       if (!registro || registro.status === "cancelado") return true;
+      if (!ehChamadaDeHoje(registro)) return true;
       const tipo = tiposMapRef.current.get(registro.tipo_atendimento_id);
       return (tipo?.nome || "").toLowerCase().includes("abordagem social");
     };
@@ -831,10 +877,19 @@ function PainelTVPage({
           getMillis(b.hora_chegada) - getMillis(a.hora_chegada)
       )[0];
 
-      // Sem ninguém com status "chamando" — mantém na tela até a próxima chamada
+      // Sem ninguém com status "chamando" hoje — mantém na tela só se ainda for chamada de hoje
       if (!chamandoFirestore) {
-        if (chamandoRawRef.current && chamadoExibidoIdRef.current) {
+        if (
+          chamandoRawRef.current &&
+          chamadoExibidoIdRef.current &&
+          ehChamadaDeHoje(chamandoRawRef.current) &&
+          !deveIgnorarChamada(chamandoRawRef.current)
+        ) {
           setChamando(montarChamadoExibicao(chamandoRawRef.current));
+        } else {
+          chamandoRawRef.current = null;
+          chamadoExibidoIdRef.current = null;
+          setChamando(null);
         }
         return;
       }
@@ -849,15 +904,22 @@ function PainelTVPage({
         lastChamadoRef.current.ts &&
         novoTs !== lastChamadoRef.current.ts;
 
-      if (isNovoId || isRechamar) {
+      const jaAnunciadoHoje =
+        lastChamadoRef.current.id === novoChamado.id &&
+        novoTs &&
+        lastChamadoRef.current.ts === novoTs;
+
+      if ((isNovoId || isRechamar) && !jaAnunciadoHoje) {
         lastChamadoRef.current = {
           id: novoChamado.id,
           ts: novoTs ?? lastChamadoRef.current.ts,
         };
+        persistirUltimoAnuncio(lastChamadoRef.current.id, lastChamadoRef.current.ts);
         cancelarAnunciosPendentes();
         dispararAnuncio(novoChamado, novoChamado.atendente_guiche);
       } else if (!lastChamadoRef.current.ts && novoTs) {
         lastChamadoRef.current.ts = novoTs;
+        persistirUltimoAnuncio(novoChamado.id, novoTs);
       }
 
       if (isNovoId) setHighlightKey((k) => k + 1);
@@ -868,15 +930,11 @@ function PainelTVPage({
     const processarHistorico = (snapshot) => {
       setError(null);
       const docs = snapshot.docs.map(mapDoc);
-      const now = new Date();
-      now.setHours(0, 0, 0, 0);
 
       const docsHoje = docs.filter((d) => {
         if (d.status === "cancelado") return false;
         if (deveIgnorarChamada(d)) return false;
-        const hc = d.hora_chamada;
-        if (!hc || !hc.toDate) return d.status === "chamando";
-        return hc.toDate() >= now;
+        return ehChamadaDeHoje(d);
       });
 
       const historico = docsHoje

@@ -36,7 +36,9 @@ export const simplify = (val) => {
 };
 
 export const isTestUser = (cidadaoOrAtendimento) => {
-  if (!cidadaoOrAtendimento || TEST_USER_IDENTIFIERS.length === 0) return false;
+  if (!cidadaoOrAtendimento) return false;
+  if (cidadaoOrAtendimento.is_test === true) return true;
+  if (TEST_USER_IDENTIFIERS.length === 0) return false;
   const cid = cidadaoOrAtendimento.cidadao || cidadaoOrAtendimento;
   const cpfRaw = cid?.cpf || cidadaoOrAtendimento.cidadao?.cpf || "";
   const cpf = String(cpfRaw || "").replace(/\D/g, "");

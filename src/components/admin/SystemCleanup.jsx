@@ -1,11 +1,24 @@
 import React, { useState } from 'react';
-import { collection, getDocs, doc, writeBatch } from 'firebase/firestore';
-import { Trash2, AlertTriangle, CheckCircle, RefreshCcw } from 'lucide-react';
+import { collection, getDocs, doc, writeBatch, query, where, limit, updateDoc } from 'firebase/firestore';
+import { Trash2, AlertTriangle, CheckCircle, RefreshCcw, Tv, XCircle } from 'lucide-react';
 import Button from '../ui/Button';
+import { isTestUser } from '../../utils/helpers';
+
+const formatTs = (ts) => {
+  if (!ts) return '—';
+  try {
+    const d = typeof ts.toDate === 'function' ? ts.toDate() : new Date(ts);
+    return d.toLocaleString('pt-BR');
+  } catch {
+    return '—';
+  }
+};
 
 const SystemCleanup = ({ db, appId, userProfile }) => {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState('');
+  const [filaChamando, setFilaChamando] = useState([]);
+  const [loadingFila, setLoadingFila] = useState(false);
   const [selectedOptions, setSelectedOptions] = useState({
     atendimentos: false,
     abordagens_social: false,
@@ -78,6 +91,47 @@ const SystemCleanup = ({ db, appId, userProfile }) => {
     return deleted;
   };
 
+  const atendimentosPath = `artifacts/${appId}/public/data/atendimentos`;
+
+  const buscarFilaChamando = async () => {
+    if (!db) return;
+    setLoadingFila(true);
+    try {
+      const snap = await getDocs(
+        query(collection(db, atendimentosPath), where('status', '==', 'chamando'), limit(50))
+      );
+      const lista = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => {
+          const ta = a.hora_chamada?.toMillis?.() || 0;
+          const tb = b.hora_chamada?.toMillis?.() || 0;
+          return tb - ta;
+        });
+      setFilaChamando(lista);
+    } catch (e) {
+      console.error(e);
+      alert('Erro ao buscar fila chamando. Veja o console.');
+    } finally {
+      setLoadingFila(false);
+    }
+  };
+
+  const liberarChamada = async (item) => {
+    if (!db || !item?.id) return;
+    const nome = item.nome_exibicao || item.cidadao?.nome || item.id;
+    if (!window.confirm(`Liberar "${nome}" da fila chamando?\n\nO painel da TV para de exibir esta chamada.`)) return;
+    try {
+      await updateDoc(doc(db, atendimentosPath, item.id), {
+        status: 'ausente',
+        hora_chamada: null,
+      });
+      setFilaChamando((prev) => prev.filter((x) => x.id !== item.id));
+    } catch (e) {
+      console.error(e);
+      alert('Erro ao liberar chamada.');
+    }
+  };
+
   const handleCleanup = async () => {
     setLoading(true);
     setShowConfirmModal(false);
@@ -113,6 +167,73 @@ const SystemCleanup = ({ db, appId, userProfile }) => {
   };
 
   return (
+    <div className="space-y-6">
+    <div className="bg-white p-6 rounded-lg shadow-sm border border-blue-200">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="bg-blue-100 p-3 rounded-full">
+          <Tv className="text-blue-600" size={24} />
+        </div>
+        <div>
+          <h2 className="text-xl font-bold text-gray-800">Fila &quot;Chamando&quot; na TV</h2>
+          <p className="text-gray-500 text-sm">
+            Lista <strong>todos</strong> os atendimentos com status chamando — inclusive contas de teste, que não aparecem nos relatórios.
+          </p>
+        </div>
+      </div>
+
+      <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 mb-4 text-sm text-blue-900">
+        Usuários de teste (ex.: Jurandy) funcionam na TV quando são cadastrados na recepção e chamados normalmente.
+        Aqui aparecem registros com status <strong>chamando</strong> travados — inclusive teste, que some dos relatórios mas ainda pode afetar a TV.
+      </div>
+
+      <button
+        type="button"
+        onClick={buscarFilaChamando}
+        disabled={loadingFila}
+        className="mb-4 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+      >
+        <RefreshCcw size={16} className={loadingFila ? 'animate-spin' : ''} />
+        {loadingFila ? 'Buscando...' : 'Verificar fila chamando agora'}
+      </button>
+
+      {filaChamando.length === 0 && !loadingFila && (
+        <p className="text-sm text-gray-500 italic">Clique em verificar para listar registros travados.</p>
+      )}
+
+      {filaChamando.length > 0 && (
+        <div className="space-y-2 max-h-80 overflow-y-auto">
+          {filaChamando.map((item) => {
+            const nome = item.nome_exibicao || item.cidadao?.nomeSocial || item.cidadao?.nome || 'Sem nome';
+            const teste = isTestUser(item);
+            return (
+              <div key={item.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 border rounded-lg bg-gray-50 text-sm">
+                <div>
+                  <p className="font-semibold text-gray-800">
+                    {nome}
+                    {teste && (
+                      <span className="ml-2 text-[10px] font-bold uppercase bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
+                        Teste — oculto nos relatórios
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    ID: {item.id} · Chamado: {formatTs(item.hora_chamada)} · Unidade: {item.cras_id || '—'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => liberarChamada(item)}
+                  className="shrink-0 px-3 py-1.5 bg-white border border-red-200 text-red-700 rounded-lg text-xs hover:bg-red-50 flex items-center gap-1"
+                >
+                  <XCircle size={14} /> Liberar da TV
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+
     <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
       <div className="flex items-center gap-3 mb-6">
         <div className="bg-red-100 p-3 rounded-full">
@@ -222,6 +343,7 @@ const SystemCleanup = ({ db, appId, userProfile }) => {
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 };
