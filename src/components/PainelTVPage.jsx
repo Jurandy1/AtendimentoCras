@@ -45,7 +45,7 @@ const notificarTTS = () => ttsStatusListeners.forEach((cb) => cb());
 const ehSmartTV = () => {
   if (typeof navigator === "undefined") return false;
   const ua = navigator.userAgent || "";
-  return /Tizen|SMART-TV|SamsungBrowser|webOS|NetCast|HbbTV|VIDAA|HiSilicon|Android.*TV|GoogleTV|AFTS|AFTM|AFTN|AFTB|AFTT|CrKey|MIBOX|BRAVIA|Roku|TCL/i.test(ua);
+  return /Tizen|SMART-TV|SamsungBrowser|webOS|NetCast|HbbTV|VIDAA|HiSilicon|Android.*TV|GoogleTV|AFTS|AFTM|AFTN|AFTB|AFTT|CrKey|MIBOX|BRAVIA|Roku|TCL|SmartTV|Smart.?TV|Web0S|Viera|Philips.*TV|Hisense|Sony.*TV/i.test(ua);
 };
 
 const isSamsungTV = () => {
@@ -84,21 +84,20 @@ const quebrarEmChunks = (texto, maxLen = 190) => {
 
 const montarUrlsMp3 = (chunk) => {
   const encoded = encodeURIComponent(chunk);
-  const urls = [];
+  // Google Translate primeiro (mais rápido). API local só como fallback.
+  const urls = [
+    `https://translate.google.com/translate_tts?ie=UTF-8&tl=pt-BR&client=tw-ob&q=${encoded}`,
+    `https://translate.google.com/translate_tts?ie=UTF-8&tl=pt-BR&client=gtx&q=${encoded}`,
+  ];
 
   if (typeof window !== "undefined" && window.location?.origin) {
     urls.push(`${window.location.origin}/api/tts?q=${encoded}`);
   }
 
-  urls.push(
-    `https://translate.google.com/translate_tts?ie=UTF-8&tl=pt-BR&client=tw-ob&q=${encoded}`,
-    `https://translate.google.com/translate_tts?ie=UTF-8&tl=pt-BR&client=gtx&q=${encoded}`
-  );
-
   return urls;
 };
 
-const tocarElementoAudio = (src) =>
+const tocarElementoAudio = (src, timeoutMs = 8000) =>
   new Promise((resolve) => {
     const audio = new Audio(src);
     audio.volume = 1.0;
@@ -112,7 +111,7 @@ const tocarElementoAudio = (src) =>
       resolve(ok);
     };
 
-    const timeoutId = setTimeout(() => concluir(false), 10000);
+    const timeoutId = setTimeout(() => concluir(false), timeoutMs);
 
     audio.onended = () => concluir(true);
     audio.onerror = () => concluir(false);
@@ -135,13 +134,16 @@ const tocarUrlMp3 = async (url) => {
     url.startsWith(window.location.origin);
 
   if (ehMesmaOrigem) {
+    // API local costuma não existir no preview — falha rápido
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const abortTimer = ctrl ? setTimeout(() => ctrl.abort(), 1200) : null;
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, ctrl ? { signal: ctrl.signal } : undefined);
       if (res.ok) {
         const blob = await res.blob();
         const blobUrl = URL.createObjectURL(blob);
         try {
-          const ok = await tocarElementoAudio(blobUrl);
+          const ok = await tocarElementoAudio(blobUrl, 8000);
           if (ok) return true;
         } finally {
           URL.revokeObjectURL(blobUrl);
@@ -149,10 +151,13 @@ const tocarUrlMp3 = async (url) => {
       }
     } catch (e) {
       dwarn(`[TTS-MP3] fetch blob falhou: ${e?.message || e}`);
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
     }
+    return false;
   }
 
-  return tocarElementoAudio(url);
+  return tocarElementoAudio(url, 8000);
 };
 
 const tocarChunkComFallback = async (chunk, indice, total) => {
@@ -193,9 +198,10 @@ const falarViaNativo = (texto) => {
     try { window.speechSynthesis.cancel(); } catch (_) {}
 
     const utt = new SpeechSynthesisUtterance(texto);
-    utt.lang = "pt-BR"; 
-    utt.rate = 0.85;    // ✅ Reduzido para melhor compatibilidade Samsung
-    utt.pitch = 1.0; 
+    utt.lang = "pt-BR";
+    // PC: fala mais rápida; Smart TV: um pouco mais pausada para clareza
+    utt.rate = ehSmartTV() ? 0.9 : 1.0;
+    utt.pitch = 1.0;
     utt.volume = 1.0;
 
     const voz = escolherVoz();
@@ -210,7 +216,7 @@ const falarViaNativo = (texto) => {
     let falouAlgo = false;
     let keepAliveId = null;
     let timeoutId = null;
-    let inicioUtt = Date.now();
+    const inicioUtt = Date.now();
 
     const limparTimeout = () => {
       if (timeoutId) {
@@ -229,12 +235,12 @@ const falarViaNativo = (texto) => {
           window.speechSynthesis.resume();
           dlog("[TTS-Nativo] Keep-alive acionado");
         } else {
-          clearInterval(keepAliveId); 
+          clearInterval(keepAliveId);
           keepAliveId = null;
         }
       }, 8000);
     };
-    
+
     utt.onend = () => {
       limparTimeout();
       if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
@@ -242,7 +248,7 @@ const falarViaNativo = (texto) => {
       dlog(`[TTS-Nativo] Finalizado (${duracao}ms)`);
       resolve(falouAlgo);
     };
-    
+
     utt.onerror = (evt) => {
       limparTimeout();
       if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
@@ -252,23 +258,36 @@ const falarViaNativo = (texto) => {
       else reject(new Error(evt.error || "erro tts nativo"));
     };
 
-    dlog(`[TTS-Nativo] Iniciando síntese...`);
-    window.speechSynthesis.speak(utt);
+    // Pequeno delay após cancel() evita bug do Chrome que engole o speak
+    const startSpeak = () => {
+      dlog(`[TTS-Nativo] Iniciando síntese...`);
+      window.speechSynthesis.speak(utt);
 
-    timeoutId = setTimeout(() => {
-      if (!falouAlgo && !window.speechSynthesis.speaking) {
-        try { window.speechSynthesis.cancel(); } catch (_) {}
-        if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
-        derror("[TTS-Nativo] Timeout: engine TTS não iniciou após 3s");
-        reject(new Error("timeout: engine TTS não iniciou"));
-      }
-    }, 3000);
+      // Se não iniciar rápido, falha cedo para cair no MP3 sem delay longo
+      timeoutId = setTimeout(() => {
+        if (!falouAlgo && !window.speechSynthesis.speaking) {
+          try { window.speechSynthesis.cancel(); } catch (_) {}
+          if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
+          derror("[TTS-Nativo] Timeout: engine TTS não iniciou após 1.2s");
+          reject(new Error("timeout: engine TTS não iniciou"));
+        }
+      }, 1200);
+    };
+
+    setTimeout(startSpeak, 40);
   });
 };
 
 const falarTextoUniversal = (() => {
   let estrategiaCacheada = null;
-  return async (texto) => {
+
+  const forcarMP3 = () => {
+    estrategiaCacheada = "mp3";
+    ttsStatus.estrategia = "mp3";
+    notificarTTS();
+  };
+
+  const api = async (texto) => {
     if (!texto || typeof window === "undefined") return;
 
     dlog(`[TTS] Iniciando: "${texto.slice(0, 50)}..."`);
@@ -277,8 +296,7 @@ const falarTextoUniversal = (() => {
       try {
         dlog(`[TTS] Tentando MP3 (motivo: ${motivo})`);
         await falarViaAudioMP3(texto);
-        estrategiaCacheada = "mp3";
-        ttsStatus.estrategia = "mp3";
+        forcarMP3();
         ttsStatus.anunciosFeitos++;
         ttsStatus.ultimoAnuncioTs = new Date();
         ttsStatus.ultimoErro = null;
@@ -288,13 +306,22 @@ const falarTextoUniversal = (() => {
         ttsStatus.ultimoErro = "MP3 falhou: " + (e?.message || e);
         notificarTTS();
         derror("[TTS] ❌ MP3 também falhou: " + (e?.message || e));
+        throw e;
       }
     };
 
+    // Smart TV: sempre MP3 (sem TTS nativo confiável)
+    const ehTV = ehSmartTV() || isSamsungTV();
+    if (ehTV) {
+      forcarMP3();
+      await usarMP3("Smart TV — narração por áudio MP3");
+      return;
+    }
+
     // Se já sabe que MP3 funciona, usa direto
-    if (estrategiaCacheada === "mp3") { 
+    if (estrategiaCacheada === "mp3") {
       await usarMP3("usando estratégia em cache");
-      return; 
+      return;
     }
 
     // Se já sabe que nativo funciona, tenta nativo primeiro
@@ -302,8 +329,8 @@ const falarTextoUniversal = (() => {
       try {
         dlog(`[TTS] Tentando nativo (em cache)`);
         const ok = await falarViaNativo(texto);
-        if (!ok) { 
-          await usarMP3("nativo retornou sem falar"); 
+        if (!ok) {
+          await usarMP3("nativo retornou sem falar");
         } else {
           ttsStatus.anunciosFeitos++;
           ttsStatus.ultimoAnuncioTs = new Date();
@@ -318,22 +345,18 @@ const falarTextoUniversal = (() => {
       }
     }
 
-    // Primeira tentativa: detecta capacidades do device
-    const ehTV = ehSmartTV();
+    // Primeira tentativa no PC/navegador
     const temSpeech = !!window.speechSynthesis;
     const voices = temSpeech ? window.speechSynthesis.getVoices() : [];
     const temVozes = voices && voices.length > 0;
-    
+
     dlog(`[TTS] Detecção: SmartTV=${ehTV}, SamsungTV=${isSamsungTV()}, speechSynthesis=${temSpeech}, vozes=${voices?.length || 0}`);
 
-    // TVs não dependem de speechSynthesis — MP3 gerado no servidor/nuvem
-    if (ehTV || (isSamsungTV() && !temVozes)) {
-      dlog("[TTS] Smart TV — usando MP3 (não precisa de TTS nativo)");
-      await usarMP3("Smart TV sem depender de speechSynthesis");
+    if (!temSpeech || !temVozes) {
+      await usarMP3("sem speechSynthesis/vozes — usando MP3");
       return;
     }
 
-    // Tenta nativo
     try {
       dlog(`[TTS] Tentando nativo...`);
       const ok = await falarViaNativo(texto);
@@ -354,6 +377,9 @@ const falarTextoUniversal = (() => {
       await usarMP3("nativo falhou: " + (e?.message || e));
     }
   };
+
+  api.forcarMP3 = forcarMP3;
+  return api;
 })();
 
 const anunciarChamada = (registro, nomePrincipal) => {
@@ -627,8 +653,26 @@ function PainelTVPage({
         dlog("[Audio] AudioContext desbloqueado");
       }
       if (window.speechSynthesis) {
-        window.speechSynthesis.getVoices();
-        dlog("[Audio] SpeechSynthesis pronto");
+        const carregarVozes = () => {
+          const voces = window.speechSynthesis.getVoices() || [];
+          dlog(`[Audio] SpeechSynthesis pronto (${voces.length} vozes)`);
+          const voz = escolherVoz();
+          if (voz) {
+            ttsStatus.vozSelecionada = `${voz.name} (${voz.lang})`;
+            notificarTTS();
+          }
+        };
+        carregarVozes();
+        if (typeof window.speechSynthesis.onvoiceschanged !== "undefined") {
+          window.speechSynthesis.onvoiceschanged = carregarVozes;
+        }
+        try {
+          const warm = new SpeechSynthesisUtterance(" ");
+          warm.volume = 0;
+          warm.rate = 2;
+          window.speechSynthesis.speak(warm);
+          window.speechSynthesis.cancel();
+        } catch (_) {}
       }
       try {
         const silentAudio = new Audio(
@@ -638,13 +682,28 @@ function PainelTVPage({
         await silentAudio.play();
         dlog("[Audio] Silent audio tocado");
       } catch (_) {}
+
+      // Na TV, força a estratégia MP3 (a mesma que resolveu o "não chamava")
+      if (ehSmartTV() || isSamsungTV()) {
+        falarTextoUniversal.forcarMP3?.();
+      }
+
       try {
         window.localStorage.setItem(SOM_ATIVO_KEY, "1");
       } catch (_) {}
       setSomAtivo(true);
       setAutoplayBlocked(false);
       dlog("[Audio] ✅ Som desbloqueado com sucesso");
-    } catch (e) {
+
+      // Confirmação audível na TV — prova que a narração está liberada
+      if (ehSmartTV() || isSamsungTV()) {
+        try {
+          playBeep();
+          setTimeout(() => {
+            falarTextoUniversal("Som do painel ativado. As próximas chamadas serão anunciadas.").catch(() => {});
+          }, 150);
+        } catch (_) {}
+      }    } catch (e) {
       derror("[Audio] Falha ao desbloquear: " + (e?.message || e));
     }
   };
@@ -847,6 +906,7 @@ function PainelTVPage({
 
       const tocar = async () => {
         try {
+          // Beep curto e narração quase imediata (antes: 400ms beep + 300ms espera)
           playBeep();
           const tid = setTimeout(async () => {
             pendingTimeoutsRef.current.delete(tid);
@@ -856,7 +916,7 @@ function PainelTVPage({
             } finally {
               setAnunciando(false);
             }
-          }, 300);
+          }, 120);
           pendingTimeoutsRef.current.add(tid);
         } catch (e) {
           dwarn("[Audio] Autoplay bloqueado: " + (e?.message || e));

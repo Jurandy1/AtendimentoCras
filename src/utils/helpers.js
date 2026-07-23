@@ -172,15 +172,16 @@ export function playBeep() {
   const gainNode = audioCtx.createGain();
   oscillator.type = "sine";
   oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
-  gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gainNode.gain.setValueAtTime(0.28, audioCtx.currentTime);
   oscillator.connect(gainNode);
   gainNode.connect(audioCtx.destination);
   oscillator.start();
+  // Beep mais curto para não atrasar a narração do nome
   gainNode.gain.exponentialRampToValueAtTime(
     0.001,
-    audioCtx.currentTime + 0.4
+    audioCtx.currentTime + 0.18
   );
-  oscillator.stop(audioCtx.currentTime + 0.4);
+  oscillator.stop(audioCtx.currentTime + 0.18);
 }
 
 export function speakChamada(chamado) {
