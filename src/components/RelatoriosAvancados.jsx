@@ -6,6 +6,13 @@ import {
 import Card from './ui/Card';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import {
+  buildAtendenteLookup,
+  buildNomeHintsFromReportData,
+  canonicalAtendenteKey,
+  getAtendenteFromLookup,
+  resolveAtendenteNome,
+} from '../utils/atendenteLookup';
 
 const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAtendimento }) => {
   const [subTab, setSubTab] = useState('retorno');
@@ -19,11 +26,15 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
     });
   };
 
-  const atendenteById = useMemo(() => {
-    const m = new Map();
-    (atendentesList || []).forEach((a) => { if (a?.id) m.set(a.id, a); });
-    return m;
-  }, [atendentesList]);
+  const atendenteById = useMemo(
+    () => buildAtendenteLookup(atendentesList),
+    [atendentesList]
+  );
+
+  const nomeHints = useMemo(
+    () => buildNomeHintsFromReportData(reportData),
+    [reportData]
+  );
 
   const crasById = useMemo(() => {
     const m = new Map();
@@ -37,7 +48,6 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
     return m;
   }, [tiposAtendimento]);
 
-  const getAtendenteNome = useCallback((id) => atendenteById.get(id)?.nome || id || 'N/A', [atendenteById]);
   const getCrasNome = useCallback((id) => crasById.get(id)?.nome || 'N/A', [crasById]);
   const getTipoNome = useCallback((id) => tipoById.get(id)?.nome || 'N/A', [tipoById]);
 
@@ -95,42 +105,104 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
     if (!reportData.length) return [];
 
     const porAtendente = {};
-    reportData.forEach(item => {
+
+    reportData.forEach((item) => {
       if (!item.atendente_id) return;
-      const id = item.atendente_id;
-      if (!porAtendente[id]) {
-        porAtendente[id] = { id, total: 0, finalizados: 0, tempoTotal: 0, countTempo: 0, dias: new Set(), ausencias: 0 };
+
+      const rawId = String(item.atendente_id).trim();
+      const key = canonicalAtendenteKey(atendenteById, rawId) || rawId;
+      const cadastro = getAtendenteFromLookup(atendenteById, rawId);
+
+      if (!porAtendente[key]) {
+        porAtendente[key] = {
+          id: key,
+          idsOrigem: new Set([rawId]),
+          total: 0,
+          finalizados: 0,
+          ausencias: 0,
+          emAndamento: 0,
+          tempoTotal: 0,
+          countTempo: 0,
+          diasFinalizados: new Set(),
+          cargo: String(cadastro?.cargo || cadastro?.role || '').trim(),
+          crasId: String(cadastro?.cras_id || cadastro?.crasId || '').trim(),
+          encontrado: !!cadastro,
+        };
       }
-      const p = porAtendente[id];
+
+      const p = porAtendente[key];
+      p.idsOrigem.add(rawId);
+      if (!p.encontrado && cadastro) {
+        p.encontrado = true;
+        p.cargo = String(cadastro?.cargo || cadastro?.role || p.cargo || '').trim();
+        p.crasId = String(cadastro?.cras_id || cadastro?.crasId || p.crasId || '').trim();
+      }
+
       p.total++;
-      if (item.status === 'finalizado') p.finalizados++;
-      if (item.status === 'ausente') p.ausencias++;
+      const status = String(item.status || '').toLowerCase();
+      if (status === 'finalizado') p.finalizados++;
+      if (status === 'ausente') p.ausencias++;
+      if (status === 'em_atendimento' || status === 'chamando') p.emAndamento++;
 
-      if (item.hora_chegada?.toDate) {
-        p.dias.add(item.hora_chegada.toDate().toLocaleDateString('pt-BR'));
+      if (status === 'finalizado' && item.hora_chegada?.toDate) {
+        p.diasFinalizados.add(item.hora_chegada.toDate().toLocaleDateString('pt-BR'));
       }
 
-      const inicio = item.hora_inicio || item.hora_chamada;
-      const fim = item.hora_fim;
-      if (inicio?.toMillis && fim?.toMillis) {
-        const diffMin = (fim.toMillis() - inicio.toMillis()) / 60000;
-        if (diffMin > 0 && diffMin < 480) {
-          p.tempoTotal += diffMin;
-          p.countTempo++;
+      // Tempo médio só em atendimentos finalizados com intervalo válido
+      if (status === 'finalizado') {
+        const inicio = item.hora_inicio || item.hora_chamada;
+        const fim = item.hora_fim;
+        if (inicio?.toMillis && fim?.toMillis) {
+          const diffMin = (fim.toMillis() - inicio.toMillis()) / 60000;
+          if (diffMin > 0 && diffMin < 480) {
+            p.tempoTotal += diffMin;
+            p.countTempo++;
+          }
         }
       }
     });
 
     return Object.values(porAtendente)
-      .map(p => ({
-        ...p,
-        nome: getAtendenteNome(p.id),
-        diasAtivos: p.dias.size,
-        mediaPorDia: p.dias.size > 0 ? (p.finalizados / p.dias.size).toFixed(1) : '0',
-        tempoMedio: p.countTempo > 0 ? Math.round(p.tempoTotal / p.countTempo) : 0
-      }))
-      .sort((a, b) => b.finalizados - a.finalizados);
-  }, [reportData, getAtendenteNome]);
+      .map((p) => {
+        const ids = [...p.idsOrigem];
+        const nome =
+          resolveAtendenteNome(atendenteById, p.id, { hints: nomeHints }) ||
+          ids.map((id) => resolveAtendenteNome(atendenteById, id, { hints: nomeHints })).find((n) => n && n !== 'Não informado') ||
+          'Não informado';
+
+        const diasAtivos = p.diasFinalizados.size;
+        const mediaPorDia = diasAtivos > 0 ? (p.finalizados / diasAtivos) : 0;
+        const taxaConclusao = p.total > 0 ? (p.finalizados / p.total) * 100 : 0;
+
+        return {
+          ...p,
+          idsOrigem: ids,
+          nome,
+          unidade: p.crasId ? getCrasNome(p.crasId) : '',
+          diasAtivos,
+          mediaPorDia: mediaPorDia.toFixed(1),
+          tempoMedio: p.countTempo > 0 ? Math.round(p.tempoTotal / p.countTempo) : 0,
+          taxaConclusao: taxaConclusao.toFixed(1),
+        };
+      })
+      .sort((a, b) => b.finalizados - a.finalizados || b.total - a.total);
+  }, [reportData, atendenteById, nomeHints, getCrasNome]);
+
+  const produtividadeResumo = useMemo(() => {
+    if (!produtividadeStats.length) {
+      return { servidores: 0, finalizados: 0, ausencias: 0, tempoMedioGeral: 0 };
+    }
+    const finalizados = produtividadeStats.reduce((s, p) => s + p.finalizados, 0);
+    const ausencias = produtividadeStats.reduce((s, p) => s + p.ausencias, 0);
+    const tempoAcum = produtividadeStats.reduce((s, p) => s + p.tempoTotal, 0);
+    const tempoCount = produtividadeStats.reduce((s, p) => s + p.countTempo, 0);
+    return {
+      servidores: produtividadeStats.length,
+      finalizados,
+      ausencias,
+      tempoMedioGeral: tempoCount > 0 ? Math.round(tempoAcum / tempoCount) : 0,
+    };
+  }, [produtividadeStats]);
 
   // ─── 3. RELATÓRIO DE AUSÊNCIAS ───
   const ausenciaStats = useMemo(() => {
@@ -200,7 +272,7 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
         topTipos: Object.entries(u.tipos).sort((a, b) => b[1] - a[1]).slice(0, 3)
       }))
       .sort((a, b) => b.total - a.total);
-  }, [reportData, getCrasNome, getTipoNome]);
+  }, [reportData, crasUnidades, getCrasNome, getTipoNome]);
 
   // ─── EXPORT / PREVIEW PDF ───
   const buildPDF = (titulo, headers, rows) => {
@@ -371,18 +443,55 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
       {/* ─── PRODUTIVIDADE ─── */}
       {subTab === 'produtividade' && (
         <div className="space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <Card className="p-4 text-center border-t-4 border-t-blue-600">
+              <p className="text-xs text-gray-500 uppercase font-bold">Servidores no período</p>
+              <p className="text-3xl font-bold text-gray-800 mt-1">{produtividadeResumo.servidores}</p>
+            </Card>
+            <Card className="p-4 text-center border-t-4 border-t-green-600">
+              <p className="text-xs text-gray-500 uppercase font-bold">Atendimentos finalizados</p>
+              <p className="text-3xl font-bold text-green-700 mt-1">{produtividadeResumo.finalizados}</p>
+            </Card>
+            <Card className="p-4 text-center border-t-4 border-t-orange-500">
+              <p className="text-xs text-gray-500 uppercase font-bold">Ausências registradas</p>
+              <p className="text-3xl font-bold text-orange-700 mt-1">{produtividadeResumo.ausencias}</p>
+            </Card>
+            <Card className="p-4 text-center border-t-4 border-t-indigo-500">
+              <p className="text-xs text-gray-500 uppercase font-bold">Tempo médio geral</p>
+              <p className="text-3xl font-bold text-indigo-700 mt-1">
+                {produtividadeResumo.tempoMedioGeral > 0 ? `${produtividadeResumo.tempoMedioGeral} min` : '—'}
+              </p>
+            </Card>
+          </div>
+
           <Card className="p-0 overflow-hidden">
-            <div className="p-4 border-b flex justify-between items-center">
-              <h3 className="font-bold text-gray-800 flex items-center gap-2">
-                <TrendingUp size={18} className="text-green-600" />
-                Produtividade por Atendente
-              </h3>
+            <div className="p-4 border-b flex flex-wrap justify-between items-center gap-3">
+              <div>
+                <h3 className="font-bold text-gray-800 flex items-center gap-2">
+                  <TrendingUp size={18} className="text-green-600" />
+                  Produtividade por Atendente
+                </h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  Nomes resolvidos pelo cadastro (id/uid), aliases de perfis duplicados e histórico de eventos.
+                  Dias ativos = dias com ao menos 1 atendimento finalizado.
+                </p>
+              </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => previewPDF(
-                    'Relatorio de Produtividade',
-                    ['Atendente', 'Finalizados', 'Dias Ativos', 'Média/Dia', 'Tempo Médio', 'Ausências'],
-                    produtividadeStats.map(p => [p.nome, p.finalizados, p.diasAtivos, p.mediaPorDia, `${p.tempoMedio} min`, p.ausencias])
+                    'Relatorio de Produtividade por Servidor',
+                    ['Servidor', 'Cargo', 'Unidade', 'Finalizados', 'Ausências', 'Dias Ativos', 'Média/Dia', 'Tempo Médio', 'Taxa Conclusão %'],
+                    produtividadeStats.map(p => [
+                      p.nome,
+                      p.cargo || '—',
+                      p.unidade || '—',
+                      p.finalizados,
+                      p.ausencias,
+                      p.diasAtivos,
+                      p.mediaPorDia,
+                      p.tempoMedio > 0 ? `${p.tempoMedio} min` : '—',
+                      `${p.taxaConclusao}%`,
+                    ])
                   )}
                   className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg text-xs font-bold hover:bg-gray-200 transition-colors"
                   title="Visualizar PDF"
@@ -391,9 +500,19 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
                 </button>
                 <button
                   onClick={() => exportPDF(
-                    'Relatorio de Produtividade',
-                    ['Atendente', 'Finalizados', 'Dias Ativos', 'Média/Dia', 'Tempo Médio', 'Ausências'],
-                    produtividadeStats.map(p => [p.nome, p.finalizados, p.diasAtivos, p.mediaPorDia, `${p.tempoMedio} min`, p.ausencias])
+                    'Relatorio de Produtividade por Servidor',
+                    ['Servidor', 'Cargo', 'Unidade', 'Finalizados', 'Ausências', 'Dias Ativos', 'Média/Dia', 'Tempo Médio', 'Taxa Conclusão %'],
+                    produtividadeStats.map(p => [
+                      p.nome,
+                      p.cargo || '—',
+                      p.unidade || '—',
+                      p.finalizados,
+                      p.ausencias,
+                      p.diasAtivos,
+                      p.mediaPorDia,
+                      p.tempoMedio > 0 ? `${p.tempoMedio} min` : '—',
+                      `${p.taxaConclusao}%`,
+                    ])
                   )}
                   className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-xs font-bold hover:bg-green-100 transition-colors"
                 >
@@ -406,27 +525,34 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="p-3 text-left font-semibold text-gray-600">#</th>
-                    <th className="p-3 text-left font-semibold text-gray-600">Atendente</th>
+                    <th className="p-3 text-left font-semibold text-gray-600">Servidor</th>
+                    <th className="p-3 text-left font-semibold text-gray-600">Cargo</th>
+                    <th className="p-3 text-left font-semibold text-gray-600">Unidade</th>
                     <th className="p-3 text-center font-semibold text-gray-600">Finalizados</th>
-                    <th className="p-3 text-center font-semibold text-gray-600">Dias Ativos</th>
-                    <th className="p-3 text-center font-semibold text-gray-600">Média/Dia</th>
-                    <th className="p-3 text-center font-semibold text-gray-600">Tempo Médio</th>
                     <th className="p-3 text-center font-semibold text-gray-600">Ausências</th>
+                    <th className="p-3 text-center font-semibold text-gray-600">Dias ativos</th>
+                    <th className="p-3 text-center font-semibold text-gray-600">Média/dia</th>
+                    <th className="p-3 text-center font-semibold text-gray-600">Tempo médio</th>
+                    <th className="p-3 text-center font-semibold text-gray-600">Taxa conclusão</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
                   {produtividadeStats.map((p, i) => (
                     <tr key={p.id} className="hover:bg-gray-50">
                       <td className="p-3 text-gray-400 font-bold">{i + 1}</td>
-                      <td className="p-3 font-medium">{p.nome}</td>
+                      <td className="p-3">
+                        <div className="font-medium text-gray-900">{p.nome}</div>
+                        {!p.encontrado && (
+                          <div className="text-[11px] text-amber-700 mt-0.5">
+                            Nome via histórico · ID legado: {p.idsOrigem?.[0]?.slice?.(0, 10)}…
+                          </div>
+                        )}
+                      </td>
+                      <td className="p-3 text-gray-600">{p.cargo || '—'}</td>
+                      <td className="p-3 text-gray-600">{p.unidade || '—'}</td>
                       <td className="p-3 text-center">
                         <span className="bg-green-100 text-green-800 px-2 py-0.5 rounded-full text-xs font-bold">{p.finalizados}</span>
                       </td>
-                      <td className="p-3 text-center text-gray-600">{p.diasAtivos}</td>
-                      <td className="p-3 text-center">
-                        <span className="bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full text-xs font-bold">{p.mediaPorDia}</span>
-                      </td>
-                      <td className="p-3 text-center text-gray-600">{p.tempoMedio > 0 ? `${p.tempoMedio} min` : '-'}</td>
                       <td className="p-3 text-center">
                         {p.ausencias > 0 ? (
                           <span className="bg-red-100 text-red-800 px-2 py-0.5 rounded-full text-xs font-bold">{p.ausencias}</span>
@@ -434,10 +560,18 @@ const RelatoriosAvancados = ({ reportData, crasUnidades, atendentesList, tiposAt
                           <span className="text-gray-300">0</span>
                         )}
                       </td>
+                      <td className="p-3 text-center text-gray-600">{p.diasAtivos}</td>
+                      <td className="p-3 text-center">
+                        <span className="bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full text-xs font-bold">{p.mediaPorDia}</span>
+                      </td>
+                      <td className="p-3 text-center text-gray-600">{p.tempoMedio > 0 ? `${p.tempoMedio} min` : '—'}</td>
+                      <td className="p-3 text-center">
+                        <span className="bg-slate-100 text-slate-800 px-2 py-0.5 rounded-full text-xs font-bold">{p.taxaConclusao}%</span>
+                      </td>
                     </tr>
                   ))}
                   {produtividadeStats.length === 0 && (
-                    <tr><td colSpan={7} className="p-8 text-center text-gray-400">Nenhum atendente com dados no período</td></tr>
+                    <tr><td colSpan={10} className="p-8 text-center text-gray-400">Nenhum atendente com dados no período</td></tr>
                   )}
                 </tbody>
               </table>

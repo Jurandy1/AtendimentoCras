@@ -3,10 +3,9 @@ import { query, collection, where, onSnapshot, limit, orderBy } from "firebase/f
 import { useAuth } from "../contexts/AuthContext";
 import { getFriendlyFirebaseError, normalizeName, playBeep, simplify } from "../utils";
 import SaoLuisLogo from "../assets/SaoLuis.png";
-import Relogio from "./Relogio";
+import "./painel-tv/PainelTVLayout.css";
+import PainelTVRelogio from "./painel-tv/PainelTVRelogio";
 import { useLocation } from "react-router-dom";
-
-const COR_PRINCIPAL = "#1351B4";
 
 // ─────────────────────────────────────────────────────────────────
 // MODO DIAGNÓSTICO — ativado com ?debug=1 na URL
@@ -365,6 +364,7 @@ const anunciarChamada = (registro, nomePrincipal) => {
 
 const SOM_ATIVO_KEY = "painel_tv_som_desbloqueado";
 const ULTIMO_ANUNCIO_KEY = "painel_tv_ultimo_anuncio";
+const EXIBICAO_TELA_KEY = "painel_tv_exibicao_tela";
 
 const inicioHojeMs = () => {
   const d = new Date();
@@ -392,6 +392,34 @@ const persistirUltimoAnuncio = (id, ts) => {
       ULTIMO_ANUNCIO_KEY,
       JSON.stringify({ id, ts, date: hojeDateString() })
     );
+  } catch {}
+};
+
+const lerExibicaoTelaPersistida = (crasId) => {
+  try {
+    const raw = window.localStorage.getItem(EXIBICAO_TELA_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.date !== hojeDateString() || parsed?.crasId !== crasId) return null;
+    return parsed.id || null;
+  } catch {
+    return null;
+  }
+};
+
+const persistirExibicaoTela = (crasId, id) => {
+  try {
+    if (!crasId || !id) return;
+    window.localStorage.setItem(
+      EXIBICAO_TELA_KEY,
+      JSON.stringify({ crasId, id, date: hojeDateString() })
+    );
+  } catch {}
+};
+
+const limparExibicaoTela = () => {
+  try {
+    window.localStorage.removeItem(EXIBICAO_TELA_KEY);
   } catch {}
 };
 
@@ -593,8 +621,9 @@ function PainelTVPage({
   useEffect(() => {
     lastChamadoRef.current = { id: null, ts: null };
     chamandoRawRef.current = null;
-    chamadoExibidoIdRef.current = null;
+    chamadoExibidoIdRef.current = selectedCrasId ? lerExibicaoTelaPersistida(selectedCrasId) : null;
     setChamando(null);
+    setUltimosChamados([]);
     cancelarAnunciosPendentes();
   }, [selectedCrasId]);
 
@@ -818,13 +847,16 @@ function PainelTVPage({
               (a) => a?.uid === atendenteId || a?.id === atendenteId
             )
           : null);
-      let localAtendimento = registro.atendente_guiche;
+      let localAtendimento = String(registro.atendente_guiche || "").trim();
+      if (atendente?.sala_atual_id) {
+        const sala = salasMapRef.current.get(atendente.sala_atual_id);
+        if (sala?.nome) localAtendimento = sala.nome;
+      }
+      if (!localAtendimento && atendente?.guiche) {
+        localAtendimento = String(atendente.guiche).trim();
+      }
       if (!localAtendimento) {
-        localAtendimento = atendente?.guiche || "Sala de atendimento";
-        if (atendente?.sala_atual_id) {
-          const sala = salasMapRef.current.get(atendente.sala_atual_id);
-          if (sala?.nome) localAtendimento = sala.nome;
-        }
+        localAtendimento = "Sala de atendimento";
       }
       return {
         ...registro,
@@ -836,23 +868,34 @@ function PainelTVPage({
     };
     montarChamadoRef.current = montarChamadoExibicao;
 
-    const dispararAnuncio = (novoChamado, localAtendimento) => {
+    const dispararAnuncio = (chamadoId) => {
       if (!somAtivoRef.current) {
         dlog("[Chamada] Som inativo — exibindo na tela sem narração");
         return;
       }
-
-      const nomePrincipal = getNomeExibicao(novoChamado);
-      dlog(`[Chamada] ${nomePrincipal} → ${localAtendimento}`);
 
       const tocar = async () => {
         try {
           playBeep();
           const tid = setTimeout(async () => {
             pendingTimeoutsRef.current.delete(tid);
+            const raw = chamandoRawRef.current;
+            if (!raw || raw.id !== chamadoId) return;
+
+            const exibicao = montarChamadoExibicao(raw);
+            chamandoRawRef.current = {
+              ...raw,
+              atendente_guiche: exibicao.atendente_guiche,
+              atendente_nome: exibicao.atendente_nome,
+            };
+            setChamando(exibicao);
+
+            const nomePrincipal = getNomeExibicao(exibicao);
+            dlog(`[Chamada] ${nomePrincipal} → ${exibicao.atendente_guiche}`);
+
             setAnunciando(true);
             try {
-              await anunciarChamada(novoChamado, nomePrincipal);
+              await anunciarChamada(exibicao, nomePrincipal);
             } finally {
               setAnunciando(false);
             }
@@ -866,78 +909,57 @@ function PainelTVPage({
       tocar();
     };
 
-    const processarChamadaAtiva = (snapshot) => {
-      const candidatos = snapshot.docs
-        .map(mapDoc)
-        .filter((d) => !deveIgnorarChamada(d));
+    const ultimoHistoricoDocsRef = { current: [] };
 
-      const chamandoFirestore = candidatos.sort(
-        (a, b) =>
-          getMillis(b.hora_chamada) - getMillis(a.hora_chamada) ||
-          getMillis(b.hora_chegada) - getMillis(a.hora_chegada)
-      )[0];
+    const registroValidoParaTela = (registro) =>
+      !!registro &&
+      registro.status !== "cancelado" &&
+      ehChamadaDeHoje(registro) &&
+      !deveIgnorarChamada(registro);
 
-      // Sem ninguém com status "chamando" hoje — mantém na tela só se ainda for chamada de hoje
-      if (!chamandoFirestore) {
-        if (
-          chamandoRawRef.current &&
-          chamadoExibidoIdRef.current &&
-          ehChamadaDeHoje(chamandoRawRef.current) &&
-          !deveIgnorarChamada(chamandoRawRef.current)
-        ) {
-          setChamando(montarChamadoExibicao(chamandoRawRef.current));
-        } else {
-          chamandoRawRef.current = null;
-          chamadoExibidoIdRef.current = null;
-          setChamando(null);
-        }
-        return;
-      }
-
-      chamandoRawRef.current = chamandoFirestore;
-      const novoChamado = montarChamadoExibicao(chamandoFirestore);
-      const novoTs = getMillis(novoChamado.hora_chamada) || null;
-      const isNovoId = chamadoExibidoIdRef.current !== novoChamado.id;
-      const isRechamar =
-        !isNovoId &&
-        novoTs &&
-        lastChamadoRef.current.ts &&
-        novoTs !== lastChamadoRef.current.ts;
-
-      const jaAnunciadoHoje =
-        lastChamadoRef.current.id === novoChamado.id &&
-        novoTs &&
-        lastChamadoRef.current.ts === novoTs;
-
-      if ((isNovoId || isRechamar) && !jaAnunciadoHoje) {
-        lastChamadoRef.current = {
-          id: novoChamado.id,
-          ts: novoTs ?? lastChamadoRef.current.ts,
-        };
-        persistirUltimoAnuncio(lastChamadoRef.current.id, lastChamadoRef.current.ts);
-        cancelarAnunciosPendentes();
-        dispararAnuncio(novoChamado, novoChamado.atendente_guiche);
-      } else if (!lastChamadoRef.current.ts && novoTs) {
-        lastChamadoRef.current.ts = novoTs;
-        persistirUltimoAnuncio(novoChamado.id, novoTs);
-      }
-
-      if (isNovoId) setHighlightKey((k) => k + 1);
-      chamadoExibidoIdRef.current = novoChamado.id;
-      setChamando(novoChamado);
+    const mesclarDadosExibicao = (novo, anterior) => {
+      if (!novo) return novo;
+      if (!anterior || anterior.id !== novo.id) return novo;
+      const guicheNovo = String(novo.atendente_guiche || "").trim();
+      const guicheAnt = String(anterior.atendente_guiche || "").trim();
+      return {
+        ...novo,
+        atendente_guiche: guicheNovo || guicheAnt || novo.atendente_guiche,
+        atendente_nome: novo.atendente_nome || anterior.atendente_nome,
+      };
     };
 
-    const processarHistorico = (snapshot) => {
-      setError(null);
-      const docs = snapshot.docs.map(mapDoc);
+    const fixarChamadoNaTela = (registro) => {
+      if (!registroValidoParaTela(registro)) return null;
+      const mesclado = mesclarDadosExibicao(registro, chamandoRawRef.current);
+      const exibicao = montarChamadoExibicao(mesclado);
+      chamandoRawRef.current = {
+        ...mesclado,
+        atendente_guiche: exibicao.atendente_guiche,
+        atendente_nome: exibicao.atendente_nome,
+      };
+      chamadoExibidoIdRef.current = mesclado.id;
+      persistirExibicaoTela(selectedCrasId, mesclado.id);
+      setChamando(exibicao);
+      return exibicao;
+    };
 
+    const limparChamadoNaTela = () => {
+      chamandoRawRef.current = null;
+      chamadoExibidoIdRef.current = null;
+      limparExibicaoTela();
+      setChamando(null);
+    };
+
+    const montarListaHistorico = (docs) => {
       const docsHoje = docs.filter((d) => {
         if (d.status === "cancelado") return false;
         if (deveIgnorarChamada(d)) return false;
+        if (!getMillis(d.hora_chamada)) return false;
         return ehChamadaDeHoje(d);
       });
 
-      const historico = docsHoje
+      return docsHoje
         .filter((d) => d.id !== chamadoExibidoIdRef.current && d.status !== "chamando")
         .sort((a, b) => getMillis(b.hora_chamada) - getMillis(a.hora_chamada))
         .slice(0, 5)
@@ -949,7 +971,108 @@ function PainelTVPage({
             atendente_guiche: exibicao.atendente_guiche,
           };
         });
-      setUltimosChamados(historico);
+    };
+
+    const manterChamadoAtualNaTela = () => {
+      if (chamadoExibidoIdRef.current && chamandoRawRef.current?.id === chamadoExibidoIdRef.current) {
+        if (registroValidoParaTela(chamandoRawRef.current)) {
+          fixarChamadoNaTela(chamandoRawRef.current);
+          return true;
+        }
+      }
+
+      const exibicaoId =
+        chamadoExibidoIdRef.current || lerExibicaoTelaPersistida(selectedCrasId);
+      if (!exibicaoId) return false;
+
+      const doc =
+        ultimoHistoricoDocsRef.current.find((d) => d.id === exibicaoId) ||
+        (chamandoRawRef.current?.id === exibicaoId ? chamandoRawRef.current : null);
+
+      if (doc && registroValidoParaTela(doc)) {
+        return !!fixarChamadoNaTela(mesclarDadosExibicao(doc, chamandoRawRef.current));
+      }
+      return false;
+    };
+
+    const processarChamadaAtiva = (snapshot) => {
+      const candidatos = snapshot.docs
+        .map(mapDoc)
+        .filter((d) => !deveIgnorarChamada(d));
+
+      const chamandoFirestore = candidatos.sort(
+        (a, b) =>
+          getMillis(b.hora_chamada) - getMillis(a.hora_chamada) ||
+          getMillis(b.hora_chegada) - getMillis(a.hora_chegada)
+      )[0];
+
+      // Sem status "chamando": mantém na tela até outra pessoa ser chamada
+      if (!chamandoFirestore) {
+        manterChamadoAtualNaTela();
+        return;
+      }
+
+      const idAnteriorTela = chamadoExibidoIdRef.current;
+      const registroMesclado = mesclarDadosExibicao(chamandoFirestore, chamandoRawRef.current);
+      const novoTs = getMillis(registroMesclado.hora_chamada) || null;
+      const isNovoId = idAnteriorTela !== registroMesclado.id;
+      const isRechamar =
+        !isNovoId &&
+        novoTs &&
+        lastChamadoRef.current.ts &&
+        novoTs !== lastChamadoRef.current.ts;
+
+      const jaAnunciadoHoje =
+        lastChamadoRef.current.id === registroMesclado.id &&
+        novoTs &&
+        lastChamadoRef.current.ts === novoTs;
+
+      const exibicao = fixarChamadoNaTela(registroMesclado);
+      if (!exibicao) return;
+
+      if (isNovoId) setHighlightKey((k) => k + 1);
+
+      if ((isNovoId || isRechamar) && !jaAnunciadoHoje) {
+        lastChamadoRef.current = {
+          id: exibicao.id,
+          ts: novoTs ?? lastChamadoRef.current.ts,
+        };
+        persistirUltimoAnuncio(lastChamadoRef.current.id, lastChamadoRef.current.ts);
+        cancelarAnunciosPendentes();
+        dispararAnuncio(exibicao.id);
+      } else if (!lastChamadoRef.current.ts && novoTs) {
+        lastChamadoRef.current.ts = novoTs;
+        persistirUltimoAnuncio(exibicao.id, novoTs);
+      }
+
+      if (ultimoHistoricoDocsRef.current.length > 0) {
+        setUltimosChamados(montarListaHistorico(ultimoHistoricoDocsRef.current));
+      }
+    };
+
+    const processarHistorico = (snapshot) => {
+      setError(null);
+      const docs = snapshot.docs.map(mapDoc);
+      ultimoHistoricoDocsRef.current = docs;
+
+      if (chamadoExibidoIdRef.current) {
+        const atualizado = docs.find((d) => d.id === chamadoExibidoIdRef.current);
+        if (atualizado?.status === "cancelado") {
+          limparChamadoNaTela();
+        } else if (atualizado && registroValidoParaTela(atualizado)) {
+          fixarChamadoNaTela(mesclarDadosExibicao(atualizado, chamandoRawRef.current));
+        }
+      } else {
+        const exibicaoId = lerExibicaoTelaPersistida(selectedCrasId);
+        if (exibicaoId) {
+          const restaurado = docs.find((d) => d.id === exibicaoId);
+          if (restaurado && registroValidoParaTela(restaurado)) {
+            fixarChamadoNaTela(restaurado);
+          }
+        }
+      }
+
+      setUltimosChamados(montarListaHistorico(docs));
     };
 
     const qChamando = query(
@@ -1025,11 +1148,11 @@ function PainelTVPage({
   const getNomeFontSize = (registro) => {
     const nome = getNomeExibicao(registro);
     const len = nome.length;
-    if (len <= 18) return "clamp(3rem, 7.5vw, 8rem)";
-    if (len <= 26) return "clamp(2.8rem, 6.5vw, 7rem)";
-    if (len <= 34) return "clamp(2.5rem, 5.5vw, 6rem)";
-    if (len <= 44) return "clamp(2.2rem, 4.5vw, 5rem)";
-    return "clamp(2rem, 3.8vw, 4.5rem)";
+    if (len <= 18) return "clamp(2.75rem, 9vmin, 7rem)";
+    if (len <= 26) return "clamp(2.4rem, 7.5vmin, 6rem)";
+    if (len <= 34) return "clamp(2.1rem, 6.5vmin, 5.25rem)";
+    if (len <= 44) return "clamp(1.85rem, 5.5vmin, 4.5rem)";
+    return "clamp(1.65rem, 4.8vmin, 4rem)";
   };
 
   const ehNomeSocial = (registro) => {
@@ -1041,16 +1164,25 @@ function PainelTVPage({
 
   if (!selectedCrasId) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen bg-gray-100 p-8">
-        <h1 className="text-3xl md:text-4xl font-bold text-blue-800 mb-4 text-center">Configuração do Painel TV</h1>
-        <p className="text-gray-600 mb-8 text-center max-w-xl">Selecione abaixo a unidade que este painel deve exibir.</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-4xl">
-          {crasUnidades.map((cras) => (
-            <button key={cras.id} type="button" onClick={() => setSelectedCrasId(cras.id)}
-              className="bg-white p-6 rounded-xl shadow hover:shadow-lg hover:scale-[1.02] transition-all text-left">
-              <h2 className="text-xl font-semibold text-blue-700">{cras.nome}</h2>
-            </button>
-          ))}
+      <div className="painel-tv-config">
+        <header className="painel-tv-config__header">
+          <img src={SaoLuisLogo} alt="Prefeitura de São Luís" />
+          <div>
+            <p>Prefeitura de São Luís</p>
+            <h1>Configuração do painel de chamadas</h1>
+          </div>
+        </header>
+        <div className="painel-tv-config__corpo">
+          <p className="text-[#5a6d82] mb-8 text-center max-w-xl">
+            Selecione a unidade que esta TV deve exibir.
+          </p>
+          <div className="painel-tv-config__grid">
+            {crasUnidades.map((cras) => (
+              <button key={cras.id} type="button" onClick={() => setSelectedCrasId(cras.id)}>
+                {cras.nome}
+              </button>
+            ))}
+          </div>
         </div>
         {debugMode && <DebugPanel online={online} somAtivo={somAtivo} selectedCrasId={null} />}
       </div>
@@ -1058,198 +1190,147 @@ function PainelTVPage({
   }
 
   const crasAtual = crasUnidades.find((c) => c.id === selectedCrasId);
+  const nomeUnidade = crasAtual?.nome || "Unidade";
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-gray-100 text-gray-800 overflow-hidden font-sans relative">
+    <div className="painel-tv">
 
       {!online && (
-        <div className="absolute top-0 left-0 w-full bg-orange-600 text-white text-center py-2 z-[10000] font-bold uppercase tracking-wide">
-          ⚠️ Sem conexão com a internet — tentando reconectar...
+        <div className="painel-tv__aviso painel-tv__aviso--offline">
+          Sem conexão com a internet — tentando reconectar
         </div>
       )}
 
       {!somAtivo && ehSmartTV() && (
         <div
-          className="fixed inset-0 z-[99998] bg-black/90 flex items-center justify-center cursor-pointer"
+          className="painel-tv__som-tela"
           onClick={unlockAudio}
           onKeyDown={unlockAudio}
           role="button"
           tabIndex={0}
         >
-          <div className="text-center text-white px-8 max-w-3xl">
-            <div className="text-[clamp(4rem,12vw,8rem)] mb-6">🔊</div>
-            <h2 className="text-[clamp(1.8rem,5vw,3.5rem)] font-black mb-4">Ativar Som do Painel</h2>
-            <p className="text-[clamp(1.1rem,3vw,1.8rem)] opacity-90 mb-8 leading-relaxed">
-              A televisão não possui narração nativa. Pressione <strong>OK</strong> no controle remoto ou toque na tela para liberar o áudio das chamadas.
+          <div className="painel-tv__som-caixa">
+            <p>Painel de chamadas</p>
+            <h2>Ativar som</h2>
+            <p>
+              Pressione <strong>OK</strong> no controle ou toque na tela para liberar a narração das chamadas.
             </p>
-            <div className="inline-block bg-red-600 hover:bg-red-500 px-10 py-5 rounded-2xl font-bold text-[clamp(1.2rem,3vw,2rem)] uppercase tracking-wide animate-pulse shadow-2xl">
-              Ativar Som Agora
-            </div>
+            <span>Ativar agora</span>
           </div>
         </div>
       )}
 
       {(autoplayBlocked || !somAtivo) && !ehSmartTV() && (
         <div
-          className={`absolute ${!online ? "top-10" : "top-0"} left-0 w-full bg-red-600 text-white text-center py-4 z-[9999] cursor-pointer animate-pulse shadow-lg font-bold text-xl uppercase tracking-wide`}
+          className={`painel-tv__aviso painel-tv__aviso--som ${!online ? "painel-tv__aviso--som-offset" : ""}`}
           onClick={unlockAudio}
+          role="button"
+          tabIndex={0}
         >
-          🔇 Clique aqui (ou pressione qualquer tecla do controle) para ativar o som
+          Clique aqui ou pressione qualquer tecla para ativar o som
         </div>
       )}
 
-      <header className="h-[12vh] w-full px-8 shadow-lg flex items-center justify-between z-10 relative shrink-0"
-        style={{ backgroundColor: COR_PRINCIPAL }}>
-        <div className="text-white font-bold truncate flex flex-col justify-center">
-          <span className="text-[2vh] opacity-80 font-medium tracking-wide">PREFEITURA DE SÃO LUÍS</span>
-          <span className="text-[4vh] leading-none">SEMCAS - {crasAtual?.nome || "Unidade"}</span>
+      <header className="painel-tv__topo">
+        <img src={SaoLuisLogo} alt="Prefeitura de São Luís" className="painel-tv__logo-topo" />
+        <div className="painel-tv__identidade">
+          <span className="painel-tv__prefeitura">Prefeitura de São Luís</span>
+          <span className="painel-tv__unidade">SEMCAS — {nomeUnidade}</span>
         </div>
-        <div className="flex items-center gap-6">
+        <div className="painel-tv__topo-acoes">
           {debugMode && (
-            <button type="button" onClick={testarTTS}
-              className="px-4 py-2 rounded-xl bg-yellow-500 hover:bg-yellow-600 text-black text-sm font-bold transition-colors shadow-sm">
-              🧪 Testar TTS
+            <button type="button" onClick={testarTTS} className="painel-tv__btn painel-tv__btn--debug">
+              Testar áudio
             </button>
           )}
           {!somAtivo && (
-            <button type="button" onClick={unlockAudio}
-              className="px-6 py-3 rounded-xl bg-white bg-opacity-10 hover:bg-opacity-20 text-white text-lg font-semibold border border-white/40 transition-colors shadow-sm uppercase tracking-wide">
-              Ativar Som
+            <button type="button" onClick={unlockAudio} className="painel-tv__btn">
+              Ativar som
             </button>
           )}
-          <div className="transform scale-125 origin-right">
-            <Relogio />
-          </div>
+          <PainelTVRelogio />
         </div>
       </header>
 
-      <style>{`
-        @keyframes flashZoom {
-          0%   { transform: scale(1);    opacity: 0.8; }
-          20%  { transform: scale(1.05); opacity: 1;   }
-          100% { transform: scale(1);    opacity: 1;   }
-        }
-        .highlight { animation: flashZoom 1.2s ease-in-out infinite alternate; }
-        @keyframes pulse-audio {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.1); opacity: 0.7; }
-        }
-        .pulse-audio { animation: pulse-audio 0.8s ease-in-out infinite; }
-      `}</style>
+      <div className="painel-tv__faixa" aria-hidden />
+
+      <section
+        className={`painel-tv__palco ${chamando ? "painel-tv__palco--ativo" : ""}`}
+        aria-live="polite"
+      >
+        <p className="painel-tv__palco-rotulo">Chamada atual</p>
+
+        <div className="painel-tv__palco-centro">
+          <h1
+            key={highlightKey}
+            className="painel-tv__nome"
+            style={{ fontSize: chamando ? getNomeFontSize(chamando) : undefined }}
+          >
+            {chamando ? getNomeExibicao(chamando) : "Aguardando próxima chamada"}
+          </h1>
+
+          {chamando && ehNomeSocial(chamando) && (
+            <span className="painel-tv__badge-social">Nome social</span>
+          )}
+
+          {chamando && getCpfFinalTexto(chamando.cidadao) && (
+            <p className="painel-tv__cpf">{getCpfFinalTexto(chamando.cidadao)}</p>
+          )}
+        </div>
+
+        <div className="painel-tv__barra-info">
+          <div className="painel-tv__info-bloco">
+            <span className="painel-tv__info-label">Atendente</span>
+            <span className="painel-tv__info-valor">
+              {chamando ? chamando.atendente_nome || "—" : "—"}
+            </span>
+          </div>
+          <div className="painel-tv__info-bloco painel-tv__info-bloco--destaque">
+            <span className="painel-tv__info-label">Local</span>
+            <span className="painel-tv__info-valor">
+              {chamando ? chamando.atendente_guiche || "—" : "—"}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <aside className="painel-tv__historico">
+        <h2 className="painel-tv__historico-titulo">Últimas chamadas</h2>
+        <div className="painel-tv__historico-grid">
+          {ultimosChamados.length > 0 ? (
+            ultimosChamados.map((it, idx) => (
+              <article key={it.id || idx} className="painel-tv__historico-item">
+                <span className="painel-tv__historico-hora">
+                  {it.hora_chamada ? formatTime(it.hora_chamada) : "--:--"}
+                </span>
+                <p className="painel-tv__historico-nome">{getNomeExibicao(it)}</p>
+                <span className="painel-tv__historico-local">{it.atendente_guiche || "—"}</span>
+              </article>
+            ))
+          ) : (
+            <p className="painel-tv__historico-item painel-tv__historico-item--vazio">
+              Nenhuma chamada anterior hoje.
+            </p>
+          )}
+        </div>
+      </aside>
+
+      <footer className="painel-tv__rodape">
+        <img src={SaoLuisLogo} alt="" className="painel-tv__logo-rodape" aria-hidden />
+        <span className="painel-tv__rodape-texto">
+          Secretaria Municipal da Criança e Assistência Social - SEMCAS
+        </span>
+      </footer>
 
       {anunciando && (
-        <div className="absolute bottom-6 right-6 bg-green-500 text-white px-5 py-3 rounded-full shadow-2xl font-bold text-lg z-50 pulse-audio flex items-center gap-2">
-          🔊 Anunciando...
+        <div className="painel-tv__anunciando" role="status">
+          Anunciando chamada
         </div>
       )}
 
-      <div className="flex-1 p-6 h-[88vh] flex gap-6 min-h-0">
-
-        <div className="flex-[3] bg-white rounded-3xl shadow-2xl flex flex-col justify-between items-center p-8 text-center border-l-[16px] border-blue-600 relative min-h-0">
-
-          <div className="w-full flex justify-center mt-4">
-            <div className="bg-gray-100 text-gray-500 px-8 py-2 rounded-full font-bold tracking-[0.2em] text-[clamp(1rem,2.5vh,1.5rem)] uppercase shadow-inner">
-              Chamando Agora
-            </div>
-          </div>
-
-          <div className="flex-1 flex flex-col justify-center items-center w-full px-4 py-8 min-h-0">
-            <div key={highlightKey}
-              className={`font-black leading-tight w-full break-words ${chamando ? "text-blue-700 highlight" : "text-gray-300"}`}
-              style={{
-                fontSize: chamando ? getNomeFontSize(chamando) : "clamp(3rem, 7.5vw, 8rem)",
-                textShadow: chamando ? "0px 4px 12px rgba(0,0,0,0.1)" : "none",
-              }}>
-              {chamando ? getNomeExibicao(chamando) : "AGUARDANDO..."}
-            </div>
-
-            {chamando && ehNomeSocial(chamando) && (
-              <div className="mt-3 text-[clamp(0.8rem,1.8vh,1.1rem)] font-bold text-blue-500 bg-blue-50 border border-blue-200 px-4 py-1.5 rounded-full">
-                Nome Social
-              </div>
-            )}
-
-            {chamando && getCpfFinalTexto(chamando.cidadao) && (
-              <div className="mt-6 bg-yellow-100 text-yellow-800 px-8 py-3 rounded-full font-bold text-[clamp(1rem,2.6vh,1.6rem)] shadow-sm border border-yellow-200 break-words">
-                {getCpfFinalTexto(chamando.cidadao)}
-              </div>
-            )}
-          </div>
-
-          <div className="w-full h-px bg-gray-200 my-6" />
-
-          <div className="grid grid-cols-2 w-full gap-8 mb-4 shrink-0">
-            <div className="flex flex-col items-center justify-start p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div className="text-gray-400 font-bold uppercase tracking-widest mb-2 text-[clamp(0.9rem,2vh,1.2rem)]">Atendente</div>
-              <div className="font-bold text-gray-800 text-[clamp(1.5rem,3.5vh,2.5rem)] leading-tight break-words w-full">
-                {chamando ? chamando.atendente_nome || "---" : "---"}
-              </div>
-            </div>
-            <div className="flex flex-col items-center justify-start p-4 bg-blue-50 rounded-2xl border border-blue-100">
-              <div className="text-blue-400 font-bold uppercase tracking-widest mb-2 text-[clamp(0.9rem,2vh,1.2rem)]">Local de Atendimento</div>
-              <div className="font-bold text-blue-700 text-[clamp(1.8rem,4vh,2.8rem)] leading-tight break-words w-full">
-                {chamando ? chamando.atendente_guiche || "---" : "---"}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex-[2] flex flex-col gap-6 h-full overflow-hidden">
-
-          <div className="bg-white rounded-3xl shadow-xl p-8 flex flex-col items-center justify-center shrink-0 min-h-[25vh]">
-            <img src={SaoLuisLogo} alt="Logo" className="w-auto h-auto max-h-[15vh] object-contain mb-4" />
-            <h2 className="text-blue-900 font-bold text-center text-[clamp(1rem,2.5vh,1.5rem)] uppercase tracking-wide">
-              Atendimento Integrado
-            </h2>
-          </div>
-
-          <div className="bg-white rounded-3xl shadow-xl p-6 flex-grow flex flex-col overflow-hidden relative">
-            <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-green-400 to-emerald-500"></div>
-            <h3 className="font-bold text-gray-700 pb-4 mb-2 flex items-center text-[clamp(1rem,2.5vh,1.5rem)] border-b border-gray-100">
-              <div className="w-4 h-4 rounded-full bg-green-500 mr-3 shadow-sm animate-pulse" />
-              Últimas Chamadas
-            </h3>
-            <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
-              {ultimosChamados.length > 0 ? (
-                ultimosChamados.map((it, idx) => (
-                  <div key={it.id || idx} className="flex flex-col bg-gray-50 p-4 rounded-xl border-l-4 border-gray-300 hover:bg-gray-100 transition-colors">
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="font-bold text-gray-800 text-[clamp(1rem,2.2vh,1.4rem)] leading-tight line-clamp-2">
-                        {getNomeExibicao(it)}
-                      </span>
-                      <span className="text-gray-400 text-[clamp(0.8rem,1.8vh,1.1rem)] font-medium whitespace-nowrap ml-2 bg-white px-2 py-0.5 rounded border border-gray-200">
-                        {it.hora_chamada ? formatTime(it.hora_chamada) : "--:--"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-end mt-2">
-                      <div className="flex flex-col">
-                        {getCpfFinalTexto(it.cidadao) && (
-                          <span className="text-xs text-gray-500 font-medium uppercase tracking-wide">
-                            {getCpfFinalTexto(it.cidadao)}
-                          </span>
-                        )}
-                      </div>
-                      <span className="font-bold text-blue-600 text-[clamp(0.9rem,2vh,1.3rem)] bg-blue-50 px-3 py-1 rounded-lg">
-                        {it.atendente_guiche}
-                      </span>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="h-full flex items-center justify-center text-gray-400 flex-col gap-2 opacity-60">
-                  <span className="text-4xl">📭</span>
-                  <span className="text-lg font-medium">Histórico vazio</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
       {error && (
-        <div className="absolute bottom-8 left-8 bg-red-600 text-white px-6 py-4 rounded-xl shadow-2xl flex items-center animate-bounce z-50">
-          <span className="mr-3 font-bold text-2xl">⚠️</span>
-          <span className="text-lg font-medium">{error}</span>
+        <div className="painel-tv__erro" role="alert">
+          {error}
         </div>
       )}
 

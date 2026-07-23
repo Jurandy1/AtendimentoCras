@@ -187,7 +187,20 @@ function App() {
           if (!current) {
             byEmail.set(emailNorm, a);
           } else if (scoreAtendente(a) > scoreAtendente(current)) {
-            byEmail.set(emailNorm, a);
+            // Mantém ids antigos (fantasmas) como alias para relatórios de produtividade
+            const aliases = new Set([
+              ...(Array.isArray(a.aliasIds) ? a.aliasIds : []),
+              ...(Array.isArray(current.aliasIds) ? current.aliasIds : []),
+              current.id,
+            ].filter((id) => id && String(id) !== String(a.id)));
+            byEmail.set(emailNorm, { ...a, aliasIds: [...aliases] });
+          } else {
+            const aliases = new Set([
+              ...(Array.isArray(current.aliasIds) ? current.aliasIds : []),
+              ...(Array.isArray(a.aliasIds) ? a.aliasIds : []),
+              a.id,
+            ].filter((id) => id && String(id) !== String(current.id)));
+            byEmail.set(emailNorm, { ...current, aliasIds: [...aliases] });
           }
         }
 

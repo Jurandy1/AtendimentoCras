@@ -10,7 +10,8 @@ import 'leaflet/dist/leaflet.css';
 import {
   calculateWaitTime, formatBRDateTyping, formatDateTime, getAgeFromBRDate,
   getAgeGroup, getBRTRange, getFriendlyFirebaseError, getIBGEMunicipiosByUF,
-  isTestUser, logAdminAction, maskCPF, simplify, normalizeRole, safeRemoveChild
+  isTestUser, logAdminAction, maskCPF, simplify, normalizeRole, safeRemoveChild,
+  buildAtendenteLookup, resolveAtendenteNome, getAtendenteFromLookup
 } from '../utils';
 import { useAuth } from '../contexts/AuthContext';
 import Chart from 'chart.js/auto';
@@ -189,7 +190,7 @@ const RelatoriosPage = ({ crasUnidades, tiposAtendimento, atendentesList }) => {
       // Filtros de memória
       data = data.filter((item) => {
         if (item.status === 'cancelado') return false;
-        if (item.status === 'ausente') return false;
+        // Mantém "ausente" para produtividade e relatório de ausências
         if (isTestUser(item)) return false;
         const tipoName = (tiposAtendimento || []).find(t => t.id === item.tipo_atendimento_id)?.nome || '';
         if (tipoName.toLowerCase().includes('abordagem social')) return false;
@@ -398,15 +399,17 @@ const RelatoriosPage = ({ crasUnidades, tiposAtendimento, atendentesList }) => {
     return m;
   }, [crasUnidades]);
 
-  const atendenteById = useMemo(() => {
-    const m = new Map();
-    (atendentesList || []).forEach((a) => { if (a?.id) m.set(a.id, a); });
-    return m;
-  }, [atendentesList]);
+  const atendenteById = useMemo(
+    () => buildAtendenteLookup(atendentesList),
+    [atendentesList]
+  );
 
   const getTipoNome = useCallback((id) => tipoById.get(id)?.nome || 'N/A', [tipoById]);
   const getCrasNome = useCallback((id) => crasById.get(id)?.nome || 'N/A', [crasById]);
-  const getAtendenteNome = useCallback((id) => atendenteById.get(id)?.nome || 'Não informado', [atendenteById]);
+  const getAtendenteNome = useCallback(
+    (id, item = null) => resolveAtendenteNome(atendenteById, id, { item, fallback: 'Não informado' }),
+    [atendenteById]
+  );
 
   const cadUnicoTypeId = useMemo(() => {
     const t = (tiposAtendimento || []).find((x) => {
@@ -459,12 +462,12 @@ const RelatoriosPage = ({ crasUnidades, tiposAtendimento, atendentesList }) => {
     const base = (reportData || []).filter(cadAcoesInfo.isCadunicoRegistro);
     return base.map((item) => {
       const cpfDigits = String(item?.cidadao?.cpf || '').replace(/\D/g, '');
-      const atendente = atendenteById.get(item?.atendente_id);
+      const atendente = getAtendenteFromLookup(atendenteById, item?.atendente_id);
       const acoes = cadAcoesInfo.normalizeAcoes(item);
       return {
         ...item,
         cpfDigits,
-        atendente_nome: atendente?.nome || 'Não informado',
+        atendente_nome: resolveAtendenteNome(atendenteById, item?.atendente_id, { item, fallback: 'Não informado' }),
         atendente_cargo: atendente?.cargo || '',
         acoes_known: acoes.known,
         acoes_unknown: acoes.unknown,
@@ -647,7 +650,10 @@ const RelatoriosPage = ({ crasUnidades, tiposAtendimento, atendentesList }) => {
       tipoCount[tipoName] = (tipoCount[tipoName] || 0) + 1;
 
       if (item.atendente_id) {
-        const nome = atendenteById.get(item.atendente_id)?.nome || item.atendente_id;
+        const nome = resolveAtendenteNome(atendenteById, item.atendente_id, {
+          item,
+          fallback: 'Não informado',
+        });
         atendenteCount[nome] = (atendenteCount[nome] || 0) + 1;
       }
 
