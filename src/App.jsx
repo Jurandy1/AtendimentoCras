@@ -99,16 +99,41 @@ function App() {
   const [salasAtendimento, setSalasAtendimento] = useState([]);
   const location = useLocation();
 
-  // Login anônimo para PainelTV
+  // Login anônimo para PainelTV (com retry — Smart TVs perdem sessão com frequência)
   useEffect(() => {
     if (loading || user) return;
     const isPainel =
-      location.pathname === '/painel' ||
-      new URLSearchParams(window.location.search).get("page") === "PainelTV";
-    if (isPainel) {
-      signInAnonymously(auth).catch((err) => console.error("Erro no login anônimo:", err));
-    }
-  }, [loading, user, auth, location]);
+      location.pathname === "/painel" ||
+      location.pathname.startsWith("/painel") ||
+      new URLSearchParams(location.search || "").get("page") === "PainelTV" ||
+      new URLSearchParams(window.location.search || "").get("page") === "PainelTV";
+    if (!isPainel) return;
+
+    let cancelled = false;
+    let attempt = 0;
+    let timer = null;
+
+    const tentar = () => {
+      if (cancelled) return;
+      attempt += 1;
+      signInAnonymously(auth)
+        .then(() => {
+          console.log("[PainelTV] Login anônimo OK");
+        })
+        .catch((err) => {
+          console.error(`[PainelTV] Erro no login anônimo (tentativa ${attempt}):`, err);
+          if (cancelled || attempt >= 8) return;
+          const delay = Math.min(15000, 1000 * Math.pow(2, attempt - 1));
+          timer = setTimeout(tentar, delay);
+        });
+    };
+
+    tentar();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [loading, user, auth, location.pathname, location.search]);
 
   // Listeners de dados globais
   useEffect(() => {
