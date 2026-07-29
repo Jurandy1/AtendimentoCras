@@ -558,7 +558,7 @@ function PainelTVPage({
   atendentesList,
   salasAtendimento,
 }) {
-  const { db, appId, user, auth } = useAuth();
+  const { db, appId } = useAuth();
   const location = useLocation();
 
   const [selectedCrasId, setSelectedCrasId] = useState(null);
@@ -831,31 +831,8 @@ function PainelTVPage({
   }, []);
 
   useEffect(() => {
-    // Sem autenticação (mesmo anônima) o Firestore nega a leitura das regras
-    if (!db || !selectedCrasId || !user) return;
-
-    let cancelled = false;
-    let retryTimer = null;
-    let authRetryInFlight = false;
-
-    const tentarReauthAnonimio = async () => {
-      if (cancelled || authRetryInFlight || !auth) return;
-      authRetryInFlight = true;
-      try {
-        const { signInAnonymously } = await import("firebase/auth");
-        dlog("[Firestore] Sessão inválida — relogando painel anonimamente...");
-        await signInAnonymously(auth);
-      } catch (err) {
-        derror("[Firestore] Falha ao renovar login anônimo: " + (err?.message || err));
-      } finally {
-        authRetryInFlight = false;
-      }
-    };
-
-    const isPermissaoNegada = (err) =>
-      err?.code === "permission-denied" ||
-      String(err?.message || "").toLowerCase().includes("insufficient permissions") ||
-      String(err?.message || "").toLowerCase().includes("missing or insufficient");
+    // Painel TV é público: não exige autenticação
+    if (!db || !selectedCrasId) return;
 
     const mapDoc = (docSnap) => {
       const data = docSnap.data() || {};
@@ -1064,9 +1041,6 @@ function PainelTVPage({
       (err) => {
         derror("[Firestore] Erro no listener de chamada ativa: " + (err?.message || err));
         setError(getFriendlyFirebaseError(err, "Erro ao atualizar chamada no painel."));
-        if (isPermissaoNegada(err)) {
-          retryTimer = setTimeout(() => tentarReauthAnonimio(), 1500);
-        }
       }
     );
 
@@ -1081,22 +1055,14 @@ function PainelTVPage({
         unsubscribeHistoricoFallback = onSnapshot(qFallback, processarHistorico, (errFb) => {
           derror("[Firestore] Fallback do histórico falhou: " + (errFb?.message || errFb));
           setError(getFriendlyFirebaseError(errFb, "Erro no modo de compatibilidade."));
-          if (isPermissaoNegada(errFb)) {
-            retryTimer = setTimeout(() => tentarReauthAnonimio(), 1500);
-          }
         });
       } else {
         derror("[Firestore] Erro no histórico: " + (err?.message || err));
         setError(getFriendlyFirebaseError(err, "Erro ao atualizar histórico do painel."));
-        if (isPermissaoNegada(err)) {
-          retryTimer = setTimeout(() => tentarReauthAnonimio(), 1500);
-        }
       }
     });
 
     return () => {
-      cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
       unsubscribeChamando();
       unsubscribeHistorico();
       if (unsubscribeHistoricoFallback) unsubscribeHistoricoFallback();
@@ -1104,7 +1070,7 @@ function PainelTVPage({
       pendingTimeoutsRef.current.clear();
       try { window.speechSynthesis?.cancel(); } catch (_) {}
     };
-  }, [db, selectedCrasId, collectionPath, user?.uid, auth]);
+  }, [db, selectedCrasId, collectionPath]);
 
   const testarTTS = () => {
     dlog("[Debug] Teste manual de TTS disparado");
@@ -1139,20 +1105,6 @@ function PainelTVPage({
     const social = normalizeName(String(registro.cidadao.nomeSocial || ""));
     return chamado === social;
   };
-
-  if (!user) {
-    return (
-      <div className="flex flex-col items-center justify-center h-screen bg-gray-100 p-8">
-        <h1 className="text-3xl md:text-4xl font-bold text-blue-800 mb-4 text-center">Painel de Chamadas</h1>
-        <p className="text-gray-600 mb-2 text-center">Conectando ao Firebase...</p>
-        <p className="text-gray-400 text-sm text-center max-w-md">
-          Aguarde o login automático do painel. Se esta mensagem persistir, recarregue a página.
-        </p>
-        {error && <p className="mt-4 text-red-600 text-center max-w-lg">{error}</p>}
-        {debugMode && <DebugPanel online={online} somAtivo={somAtivo} selectedCrasId={selectedCrasId} />}
-      </div>
-    );
-  }
 
   if (!selectedCrasId) {
     return (

@@ -106,8 +106,8 @@ service cloud.firestore {
  
      // 2. ATENDENTES
     match /artifacts/{appId}/public/data/atendentes/{docId} {
-      // Leitura requer autenticação (inclui login anônimo do Painel TV)
-      allow read: if isAuthenticated();
+      // Leitura pública: Painel TV exibe nome/guichê sem login
+      allow read: if true;
 
       // Criação:
       // - Admin/Coord
@@ -142,8 +142,8 @@ service cloud.firestore {
  
      // 3. ATENDIMENTOS 
      match /artifacts/{appId}/public/data/atendimentos/{document=**} { 
-       // Leitura requer autenticação (inclui login anônimo do Painel TV)
-       allow read: if isAuthenticated(); 
+       // Leitura pública: Painel TV mostra chamadas sem autenticação
+       allow read: if true; 
  
        // Escrita restrita a perfis operacionais
        allow create: if isSuperintendente(appId) || isCoordenador(appId) || isAtendente(appId); 
@@ -164,7 +164,8 @@ service cloud.firestore {
  
      // 4. CONFIGURAÇÕES E OUTROS 
      match /artifacts/{appId}/public/data/cras_unidades/{document=**} { 
-       allow read: if isAuthenticated(); 
+       // Leitura pública: Painel TV precisa listar/selecionar a unidade
+       allow read: if true; 
        allow write: if isSuperintendente(appId) || isCoordenador(appId); 
      } 
  
@@ -189,12 +190,14 @@ service cloud.firestore {
     }
  
      match /artifacts/{appId}/public/data/tipos_atendimento/{document=**} { 
-       allow read: if isAuthenticated(); 
+       // Leitura pública: Painel TV mostra o tipo da chamada
+       allow read: if true; 
        allow write: if isSuperintendente(appId) || isCoordenador(appId); 
      } 
  
      match /artifacts/{appId}/public/data/atendente_salas/{document=**} { 
-       allow read: if isAuthenticated(); 
+       // Leitura pública: Painel TV mostra guichê/sala
+       allow read: if true; 
        allow write: if isAtendente(appId) || isCoordenador(appId) || isSuperintendente(appId); 
      } 
  

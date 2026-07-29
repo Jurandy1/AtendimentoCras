@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo, Suspense } from "react";
 import { Routes, Route, Navigate, useLocation, Link, Outlet } from "react-router-dom";
 import { useAuth } from "./contexts/AuthContext";
 import { collection, onSnapshot } from "firebase/firestore";
-import { signInAnonymously } from "firebase/auth";
 import {
   Tv, LayoutDashboard, Users, Building, UserCog, Palette, Settings, LogOut,
   UserPlus, CheckCircle, ArrowRightLeft, Lock, BookOpen, Menu, X, FileText,
@@ -99,45 +98,17 @@ function App() {
   const [salasAtendimento, setSalasAtendimento] = useState([]);
   const location = useLocation();
 
-  // Login anônimo para PainelTV (com retry — Smart TVs perdem sessão com frequência)
-  useEffect(() => {
-    if (loading || user) return;
-    const isPainel =
-      location.pathname === "/painel" ||
-      location.pathname.startsWith("/painel") ||
-      new URLSearchParams(location.search || "").get("page") === "PainelTV" ||
-      new URLSearchParams(window.location.search || "").get("page") === "PainelTV";
-    if (!isPainel) return;
-
-    let cancelled = false;
-    let attempt = 0;
-    let timer = null;
-
-    const tentar = () => {
-      if (cancelled) return;
-      attempt += 1;
-      signInAnonymously(auth)
-        .then(() => {
-          console.log("[PainelTV] Login anônimo OK");
-        })
-        .catch((err) => {
-          console.error(`[PainelTV] Erro no login anônimo (tentativa ${attempt}):`, err);
-          if (cancelled || attempt >= 8) return;
-          const delay = Math.min(15000, 1000 * Math.pow(2, attempt - 1));
-          timer = setTimeout(tentar, delay);
-        });
-    };
-
-    tentar();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [loading, user, auth, location.pathname, location.search]);
+  const isPainelRoute =
+    location.pathname === "/painel" ||
+    location.pathname.startsWith("/painel") ||
+    new URLSearchParams(location.search || "").get("page") === "PainelTV" ||
+    new URLSearchParams(window.location.search || "").get("page") === "PainelTV";
 
   // Listeners de dados globais
+  // Painel TV: lê sem login. Demais telas: só com usuário autenticado.
   useEffect(() => {
-    if (!user || !db) return;
+    if (!db) return;
+    if (!user && !isPainelRoute) return;
     let mounted = true;
 
     const unsubCras = onSnapshot(
@@ -249,7 +220,7 @@ function App() {
       unsubAtendentes();
       unsubSalas();
     };
-  }, [user, db, appId]);
+  }, [user, db, appId, isPainelRoute]);
 
   const isAppUser = !!user && !user.isAnonymous;
   const roleNorm  = userProfile?.roleNorm || normalizeRole(userProfile?.role || userProfile?.cargo);
@@ -311,7 +282,8 @@ function App() {
     };
   }, [loading]);
 
-  if (loading) {
+  // Painel TV não depende de autenticação — liberta a TV do "Conectando..."
+  if (loading && !isPainelRoute) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
         <div className="bg-white/95 shadow-lg rounded-xl p-8 max-w-md w-full text-center backdrop-blur-sm">
