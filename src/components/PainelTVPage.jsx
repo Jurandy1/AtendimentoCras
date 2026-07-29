@@ -176,7 +176,7 @@ const tocarChunkComFallback = async (chunk, indice, total) => {
 
 const falarViaAudioMP3 = async (texto) => {
   const chunks = quebrarEmChunks(texto);
-  if (chunks.length === 0) return;
+  if (chunks.length === 0) return true;
 
   let algumTocou = false;
   for (let i = 0; i < chunks.length; i++) {
@@ -185,8 +185,10 @@ const falarViaAudioMP3 = async (texto) => {
   }
 
   if (!algumTocou) {
-    throw new Error("nenhum áudio MP3 foi reproduzido");
+    derror("[TTS-MP3] nenhum áudio MP3 foi reproduzido");
+    return false;
   }
+  return true;
 };
 
 const falarViaNativo = (texto) => {
@@ -295,18 +297,26 @@ const falarTextoUniversal = (() => {
     const usarMP3 = async (motivo) => {
       try {
         dlog(`[TTS] Tentando MP3 (motivo: ${motivo})`);
-        await falarViaAudioMP3(texto);
+        const ok = await falarViaAudioMP3(texto);
+        if (!ok) {
+          ttsStatus.ultimoErro = "MP3 falhou: nenhum áudio MP3 foi reproduzido";
+          notificarTTS();
+          derror("[TTS] ❌ MP3 também falhou: nenhum áudio MP3 foi reproduzido");
+          return false;
+        }
         forcarMP3();
         ttsStatus.anunciosFeitos++;
         ttsStatus.ultimoAnuncioTs = new Date();
         ttsStatus.ultimoErro = null;
         notificarTTS();
         dlog("[TTS] ✅ Anunciou via MP3 (Google Translate)");
+        return true;
       } catch (e) {
         ttsStatus.ultimoErro = "MP3 falhou: " + (e?.message || e);
         notificarTTS();
         derror("[TTS] ❌ MP3 também falhou: " + (e?.message || e));
-        throw e;
+        // Não relança: o painel da TV deve continuar na tela mesmo sem som
+        return false;
       }
     };
 
@@ -911,12 +921,16 @@ function PainelTVPage({
       const tocar = async () => {
         try {
           // Beep curto e narração quase imediata (antes: 400ms beep + 300ms espera)
-          playBeep();
+          try { playBeep(); } catch (_) {}
           const tid = setTimeout(async () => {
             pendingTimeoutsRef.current.delete(tid);
             setAnunciando(true);
             try {
               await anunciarChamada(novoChamado, nomePrincipal);
+              if (ttsStatus.ultimoErro) setAutoplayBlocked(true);
+            } catch (e) {
+              dwarn("[Audio] Falha no anúncio: " + (e?.message || e));
+              setAutoplayBlocked(true);
             } finally {
               setAnunciando(false);
             }
@@ -927,7 +941,10 @@ function PainelTVPage({
           setAutoplayBlocked(true);
         }
       };
-      tocar();
+      tocar().catch((e) => {
+        dwarn("[Audio] Erro ao disparar anúncio: " + (e?.message || e));
+        setAutoplayBlocked(true);
+      });
     };
 
     const processarChamadaAtiva = (snapshot) => {
@@ -1074,7 +1091,8 @@ function PainelTVPage({
 
   const testarTTS = () => {
     dlog("[Debug] Teste manual de TTS disparado");
-    falarTextoUniversal("Atenção! Maria da Silva. Por favor, dirija-se ao guichê três.");
+    falarTextoUniversal("Atenção! Maria da Silva. Por favor, dirija-se ao guichê três.")
+      .catch((e) => derror("[Debug] Teste TTS falhou: " + (e?.message || e)));
   };
 
   const formatTime = (ts) => {
@@ -1153,6 +1171,18 @@ function PainelTVPage({
               Ativar Som Agora
             </div>
           </div>
+        </div>
+      )}
+
+      {somAtivo && autoplayBlocked && ehSmartTV() && (
+        <div
+          className="absolute top-0 left-0 w-full bg-red-600 text-white text-center py-4 z-[9999] cursor-pointer animate-pulse shadow-lg font-bold text-xl uppercase tracking-wide"
+          onClick={async () => {
+            setAutoplayBlocked(false);
+            await unlockAudio();
+          }}
+        >
+          🔇 Toque aqui / OK no controle para reativar o som da TV
         </div>
       )}
 
