@@ -29,7 +29,7 @@ const dwarn  = (...args) => { console.warn(...args);  addDebugLog("warn",  args.
 const derror = (...args) => { console.error(...args); addDebugLog("error", args.join(" ")); };
 
 // ─────────────────────────────────────────────────────────────────
-// TTS UNIVERSAL — Samsung, TCL, HQ, LG, Android TV, PC
+// TTS UNIVERSAL — Samsung Tizen + HQ (e outras Smart TVs)
 // ─────────────────────────────────────────────────────────────────
 
 const ttsStatus = {
@@ -38,20 +38,70 @@ const ttsStatus = {
   anunciosFeitos: 0,
   ultimoAnuncioTs: null,
   ultimoErro: null,
+  marcaDetectada: null,
 };
 const ttsStatusListeners = new Set();
 const notificarTTS = () => ttsStatusListeners.forEach((cb) => cb());
 
-const ehSmartTV = () => {
-  if (typeof navigator === "undefined") return false;
-  const ua = navigator.userAgent || "";
-  return /Tizen|SMART-TV|SamsungBrowser|webOS|NetCast|HbbTV|VIDAA|HiSilicon|Android.*TV|GoogleTV|AFTS|AFTM|AFTN|AFTB|AFTT|CrKey|MIBOX|BRAVIA|Roku|TCL|SmartTV|Smart.?TV|Web0S|Viera|Philips.*TV|Hisense|Sony.*TV/i.test(ua);
+const FORCAR_TV_KEY = "painel_tv_force_modo_tv";
+
+const lerForceTv = () => {
+  try {
+    if (typeof window === "undefined") return false;
+    const qs = new URLSearchParams(window.location.search || "");
+    // Aceita ?tv=1 na query ou no hash (#/painel-tv?tv=1)
+    const hash = String(window.location.hash || "");
+    const hashQs = hash.includes("?") ? new URLSearchParams(hash.split("?")[1]) : null;
+    if (qs.get("tv") === "1" || hashQs?.get("tv") === "1") {
+      try { window.localStorage.setItem(FORCAR_TV_KEY, "1"); } catch (_) {}
+      return true;
+    }
+    return window.localStorage.getItem(FORCAR_TV_KEY) === "1";
+  } catch {
+    return false;
+  }
 };
 
 const isSamsungTV = () => {
   if (typeof navigator === "undefined") return false;
   const ua = navigator.userAgent || "";
-  return /Tizen|SamsungBrowser/i.test(ua);
+  return /Tizen|SamsungBrowser|SMART-TV.*Samsung|Samsung.*SMART-TV|SMART-TV;\s*LINUX;\s*Tizen/i.test(ua);
+};
+
+/** TVs HQ (Brasil) — Android TV / WebKit genérico */
+const isHqTV = () => {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /\bHQ\b|HQT|HQLED|HQ.?Smart|HQ.?TV/i.test(ua);
+};
+
+const ehSmartTV = () => {
+  if (typeof navigator === "undefined") return false;
+  if (lerForceTv()) return true;
+  if (isSamsungTV() || isHqTV()) return true;
+
+  const ua = navigator.userAgent || "";
+  const porUa = /Tizen|SMART-TV|SamsungBrowser|webOS|NetCast|HbbTV|VIDAA|HiSilicon|Android.*TV|GoogleTV|AFTS|AFTM|AFTN|AFTB|AFTT|CrKey|MIBOX|BRAVIA|Roku|TCL|SmartTV|Smart.?TV|Web0S|Viera|Philips.*TV|Hisense|Sony.*TV|SmartHub/i.test(ua);
+
+  // Heurística: telas grandes sem mouse fino (comum em browser da TV)
+  let porTela = false;
+  try {
+    const coarse = window.matchMedia?.("(pointer: coarse)")?.matches;
+    const noHover = window.matchMedia?.("(hover: none)")?.matches;
+    const grande = Math.min(window.screen?.width || 0, window.screen?.height || 0) >= 720
+      && Math.max(window.screen?.width || 0, window.screen?.height || 0) >= 1280;
+    porTela = !!(grande && coarse && noHover);
+  } catch (_) {}
+
+  return porUa || porTela;
+};
+
+const marcaTvDetectada = () => {
+  if (isSamsungTV()) return "Samsung";
+  if (isHqTV()) return "HQ";
+  if (lerForceTv()) return "TV (forçado)";
+  if (ehSmartTV()) return "Smart TV";
+  return "PC/Navegador";
 };
 
 const escolherVoz = () => {
@@ -135,6 +185,7 @@ const isNotAllowedError = (err) => {
 /**
  * Toca um MP3. Se o play() iniciar, NÃO tenta outra URL (evita eco/duplicação na TV).
  * Retorna: true | false | "blocked"
+ * Otimizado para Samsung (Tizen) e HQ.
  */
 const tocarElementoAudio = (src, timeoutMs = 45000) =>
   new Promise((resolve) => {
@@ -142,7 +193,11 @@ const tocarElementoAudio = (src, timeoutMs = 45000) =>
     const audio = new Audio();
     audio.preload = "auto";
     audio.volume = 1.0;
-    // Não usar crossOrigin — quebra Google TTS em várias Smart TVs
+    try {
+      audio.setAttribute("playsinline", "true");
+      audio.setAttribute("webkit-playsinline", "true");
+    } catch (_) {}
+    // Não usar crossOrigin — quebra Google TTS em Tizen/HQ
     audioAtual = audio;
 
     let finalizado = false;
@@ -161,7 +216,6 @@ const tocarElementoAudio = (src, timeoutMs = 45000) =>
         concluir(false);
         return;
       }
-      // Se já começou a tocar, considera sucesso (algumas TVs não disparam onended)
       if (iniciou) {
         dlog("[TTS-MP3] Timeout com áudio já iniciado — considerando OK");
         try { audio.pause(); } catch (_) {}
@@ -174,7 +228,7 @@ const tocarElementoAudio = (src, timeoutMs = 45000) =>
 
     audio.onplaying = () => {
       iniciou = true;
-      dlog(`[TTS-MP3] Reproduzindo: ${String(src).slice(0, 72)}...`);
+      dlog(`[TTS-MP3] Reproduzindo (${marcaTvDetectada()}): ${String(src).slice(0, 72)}...`);
     };
     audio.onended = () => concluir(true);
     audio.onerror = () => {
@@ -182,18 +236,31 @@ const tocarElementoAudio = (src, timeoutMs = 45000) =>
       else concluir(false);
     };
 
+    const iniciarPlay = () => {
+      const playPromise = audio.play();
+      if (playPromise?.then) {
+        playPromise
+          .then(() => {
+            iniciou = true;
+          })
+          .catch((e) => {
+            derror(`[TTS-MP3] play() falhou: ${e?.message || e}`);
+            if (isNotAllowedError(e)) concluir("blocked");
+            else concluir(false);
+          });
+      }
+    };
+
     audio.src = src;
-    const playPromise = audio.play();
-    if (playPromise?.then) {
-      playPromise
-        .then(() => {
-          iniciou = true;
-        })
-        .catch((e) => {
-          derror(`[TTS-MP3] play() falhou: ${e?.message || e}`);
-          if (isNotAllowedError(e)) concluir("blocked");
-          else concluir(false);
-        });
+    try {
+      audio.load();
+    } catch (_) {}
+
+    // Samsung Tizen / HQ: pequeno atraso após load() melhora o play
+    if (isSamsungTV() || isHqTV() || ehSmartTV()) {
+      setTimeout(iniciarPlay, 60);
+    } else {
+      iniciarPlay();
     }
   });
 
@@ -216,7 +283,9 @@ const tocarChunkComFallback = async (chunk, indice, total) => {
 };
 
 const falarViaAudioMP3 = async (texto) => {
-  const chunks = quebrarEmChunks(texto, 160);
+  // HQ/Samsung lidam melhor com frases mais curtas
+  const maxLen = (isSamsungTV() || isHqTV() || ehSmartTV()) ? 120 : 160;
+  const chunks = quebrarEmChunks(texto, maxLen);
   if (chunks.length === 0) return true;
 
   let algumTocou = false;
@@ -225,7 +294,6 @@ const falarViaAudioMP3 = async (texto) => {
     if (ok === "blocked") return "blocked";
     if (ok === true) algumTocou = true;
     else if (!algumTocou) {
-      // primeira chunk falhou em todas as URLs
       return false;
     }
   }
@@ -374,10 +442,13 @@ const falarTextoUniversal = (() => {
       }
     };
 
-    const ehTV = ehSmartTV() || isSamsungTV();
+    const ehTV = ehSmartTV() || isSamsungTV() || isHqTV();
+    ttsStatus.marcaDetectada = marcaTvDetectada();
+    notificarTTS();
+
     if (ehTV) {
       forcarMP3();
-      return usarMP3("Smart TV — narração por áudio MP3");
+      return usarMP3(`TV ${marcaTvDetectada()} — narração por áudio MP3`);
     }
 
     if (estrategiaCacheada === "mp3") {
@@ -404,7 +475,7 @@ const falarTextoUniversal = (() => {
     const voices = temSpeech ? window.speechSynthesis.getVoices() : [];
     const temVozes = voices && voices.length > 0;
 
-    dlog(`[TTS] Detecção: SmartTV=${ehTV}, SamsungTV=${isSamsungTV()}, speechSynthesis=${temSpeech}, vozes=${voices?.length || 0}`);
+    dlog(`[TTS] Detecção: marca=${marcaTvDetectada()}, SmartTV=${ehTV}, Samsung=${isSamsungTV()}, HQ=${isHqTV()}, speech=${temSpeech}, vozes=${voices?.length || 0}`);
 
     if (!temSpeech || !temVozes) {
       return usarMP3("sem speechSynthesis/vozes — usando MP3");
@@ -544,6 +615,9 @@ function DebugPanel({ online, somAtivo, selectedCrasId }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 4, marginBottom: 8 }}>
+        <span style={{ color: "#888" }}>Dispositivo:</span>
+        <span style={{ fontWeight: "bold" }}>{ttsStatus.marcaDetectada || marcaTvDetectada()}</span>
+
         <span style={{ color: "#888" }}>TTS:</span>
         <span style={{ color: corEstrategia, fontWeight: "bold" }}>
           {ttsStatus.estrategia.toUpperCase()}
@@ -714,8 +788,11 @@ function PainelTVPage({
       // Beep curto como prova de áudio (sem frase longa que gera eco/falha)
       try { playBeep(); } catch (_) {}
 
-      if (ehSmartTV() || isSamsungTV()) {
+      if (ehSmartTV() || isSamsungTV() || isHqTV()) {
         falarTextoUniversal.forcarMP3?.();
+        ttsStatus.marcaDetectada = marcaTvDetectada();
+        notificarTTS();
+        dlog(`[Audio] Modo TV: ${marcaTvDetectada()} — MP3 obrigatório`);
       }
 
       try {
@@ -1194,7 +1271,7 @@ function PainelTVPage({
             <div className="text-[clamp(4rem,12vw,8rem)] mb-6">🔊</div>
             <h2 className="text-[clamp(1.8rem,5vw,3.5rem)] font-black mb-4">Ativar Som do Painel</h2>
             <p className="text-[clamp(1.1rem,3vw,1.8rem)] opacity-90 mb-8 leading-relaxed">
-              Pressione <strong>OK</strong> no controle remoto ou toque na tela <strong>uma vez</strong> para liberar a narração das chamadas.
+              TV {marcaTvDetectada()}: pressione <strong>OK</strong> no controle <strong>uma vez</strong> para liberar a narração das chamadas (Samsung / HQ).
             </p>
             <div className="inline-block bg-red-600 hover:bg-red-500 px-10 py-5 rounded-2xl font-bold text-[clamp(1.2rem,3vw,2rem)] uppercase tracking-wide animate-pulse shadow-2xl">
               Ativar Som Agora
