@@ -84,104 +84,150 @@ const quebrarEmChunks = (texto, maxLen = 190) => {
 
 const montarUrlsMp3 = (chunk) => {
   const encoded = encodeURIComponent(chunk);
-  // Google Translate primeiro (mais rápido). API local só como fallback.
-  const urls = [
+  return [
     `https://translate.google.com/translate_tts?ie=UTF-8&tl=pt-BR&client=tw-ob&q=${encoded}`,
     `https://translate.google.com/translate_tts?ie=UTF-8&tl=pt-BR&client=gtx&q=${encoded}`,
   ];
-
-  if (typeof window !== "undefined" && window.location?.origin) {
-    urls.push(`${window.location.origin}/api/tts?q=${encoded}`);
-  }
-
-  return urls;
 };
 
-const tocarElementoAudio = (src, timeoutMs = 8000) =>
+// Player único — evita narração duplicada na TV
+let audioCtxGlobal = null;
+let audioAtual = null;
+let anuncioSeq = 0;
+
+const pararAudioAtual = () => {
+  anuncioSeq += 1;
+  if (audioAtual) {
+    try {
+      audioAtual.onended = null;
+      audioAtual.onerror = null;
+      audioAtual.onplaying = null;
+      audioAtual.pause();
+      audioAtual.removeAttribute("src");
+      audioAtual.load();
+    } catch (_) {}
+    audioAtual = null;
+  }
+  try { window.speechSynthesis?.cancel(); } catch (_) {}
+};
+
+const garantirAudioContext = async () => {
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    if (!audioCtxGlobal || audioCtxGlobal.state === "closed") {
+      audioCtxGlobal = new Ctor();
+    }
+    if (audioCtxGlobal.state === "suspended") {
+      await audioCtxGlobal.resume();
+    }
+    return audioCtxGlobal;
+  } catch {
+    return null;
+  }
+};
+
+const isNotAllowedError = (err) => {
+  const msg = String(err?.name || err?.message || err || "").toLowerCase();
+  return msg.includes("notallowed") || msg.includes("not allowed") || msg.includes("autoplay");
+};
+
+/**
+ * Toca um MP3. Se o play() iniciar, NÃO tenta outra URL (evita eco/duplicação na TV).
+ * Retorna: true | false | "blocked"
+ */
+const tocarElementoAudio = (src, timeoutMs = 45000) =>
   new Promise((resolve) => {
-    const audio = new Audio(src);
-    audio.volume = 1.0;
+    const meuSeq = anuncioSeq;
+    const audio = new Audio();
     audio.preload = "auto";
+    audio.volume = 1.0;
+    // Não usar crossOrigin — quebra Google TTS em várias Smart TVs
+    audioAtual = audio;
 
     let finalizado = false;
-    const concluir = (ok) => {
+    let iniciou = false;
+
+    const concluir = (resultado) => {
       if (finalizado) return;
       finalizado = true;
       clearTimeout(timeoutId);
-      resolve(ok);
+      if (audioAtual === audio) audioAtual = null;
+      resolve(resultado);
     };
 
-    const timeoutId = setTimeout(() => concluir(false), timeoutMs);
+    const timeoutId = setTimeout(() => {
+      if (meuSeq !== anuncioSeq) {
+        concluir(false);
+        return;
+      }
+      // Se já começou a tocar, considera sucesso (algumas TVs não disparam onended)
+      if (iniciou) {
+        dlog("[TTS-MP3] Timeout com áudio já iniciado — considerando OK");
+        try { audio.pause(); } catch (_) {}
+        concluir(true);
+      } else {
+        try { audio.pause(); } catch (_) {}
+        concluir(false);
+      }
+    }, timeoutMs);
 
+    audio.onplaying = () => {
+      iniciou = true;
+      dlog(`[TTS-MP3] Reproduzindo: ${String(src).slice(0, 72)}...`);
+    };
     audio.onended = () => concluir(true);
-    audio.onerror = () => concluir(false);
+    audio.onerror = () => {
+      if (iniciou) concluir(true);
+      else concluir(false);
+    };
 
+    audio.src = src;
     const playPromise = audio.play();
     if (playPromise?.then) {
       playPromise
-        .then(() => dlog(`[TTS-MP3] Reproduzindo: ${String(src).slice(0, 72)}...`))
+        .then(() => {
+          iniciou = true;
+        })
         .catch((e) => {
           derror(`[TTS-MP3] play() falhou: ${e?.message || e}`);
-          concluir(false);
+          if (isNotAllowedError(e)) concluir("blocked");
+          else concluir(false);
         });
     }
   });
 
-const tocarUrlMp3 = async (url) => {
-  const ehMesmaOrigem =
-    typeof window !== "undefined" &&
-    window.location?.origin &&
-    url.startsWith(window.location.origin);
-
-  if (ehMesmaOrigem) {
-    // API local costuma não existir no preview — falha rápido
-    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const abortTimer = ctrl ? setTimeout(() => ctrl.abort(), 1200) : null;
-    try {
-      const res = await fetch(url, ctrl ? { signal: ctrl.signal } : undefined);
-      if (res.ok) {
-        const blob = await res.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        try {
-          const ok = await tocarElementoAudio(blobUrl, 8000);
-          if (ok) return true;
-        } finally {
-          URL.revokeObjectURL(blobUrl);
-        }
-      }
-    } catch (e) {
-      dwarn(`[TTS-MP3] fetch blob falhou: ${e?.message || e}`);
-    } finally {
-      if (abortTimer) clearTimeout(abortTimer);
-    }
-    return false;
-  }
-
-  return tocarElementoAudio(url, 8000);
-};
+const tocarUrlMp3 = async (url) => tocarElementoAudio(url, 45000);
 
 const tocarChunkComFallback = async (chunk, indice, total) => {
   const urls = montarUrlsMp3(chunk);
   for (let i = 0; i < urls.length; i++) {
+    if (i > 0) pararAudioAtual(); // só troca URL se a anterior NÃO iniciou
     dlog(`[TTS-MP3] Chunk ${indice + 1}/${total}, tentativa ${i + 1}/${urls.length}`);
     const ok = await tocarUrlMp3(urls[i]);
-    if (ok) {
+    if (ok === true) {
       dlog(`[TTS-MP3] Chunk ${indice + 1} concluído`);
       return true;
     }
+    if (ok === "blocked") return "blocked";
     dwarn(`[TTS-MP3] Chunk ${indice + 1} falhou na URL ${i + 1}`);
   }
   return false;
 };
 
 const falarViaAudioMP3 = async (texto) => {
-  const chunks = quebrarEmChunks(texto);
+  const chunks = quebrarEmChunks(texto, 160);
   if (chunks.length === 0) return true;
 
   let algumTocou = false;
   for (let i = 0; i < chunks.length; i++) {
     const ok = await tocarChunkComFallback(chunks[i], i, chunks.length);
-    if (ok) algumTocou = true;
+    if (ok === "blocked") return "blocked";
+    if (ok === true) algumTocou = true;
+    else if (!algumTocou) {
+      // primeira chunk falhou em todas as URLs
+      return false;
+    }
   }
 
   if (!algumTocou) {
@@ -289,15 +335,24 @@ const falarTextoUniversal = (() => {
     notificarTTS();
   };
 
-  const api = async (texto) => {
-    if (!texto || typeof window === "undefined") return;
+  const api = async (texto, { substituir = true } = {}) => {
+    if (!texto || typeof window === "undefined") return true;
+
+    if (substituir) pararAudioAtual();
 
     dlog(`[TTS] Iniciando: "${texto.slice(0, 50)}..."`);
+    await garantirAudioContext();
 
     const usarMP3 = async (motivo) => {
       try {
         dlog(`[TTS] Tentando MP3 (motivo: ${motivo})`);
         const ok = await falarViaAudioMP3(texto);
+        if (ok === "blocked") {
+          ttsStatus.ultimoErro = "MP3 bloqueado: autoplay";
+          notificarTTS();
+          derror("[TTS] ❌ MP3 bloqueado por autoplay — precisa gesto do usuário");
+          return "blocked";
+        }
         if (!ok) {
           ttsStatus.ultimoErro = "MP3 falhou: nenhum áudio MP3 foi reproduzido";
           notificarTTS();
@@ -315,47 +370,36 @@ const falarTextoUniversal = (() => {
         ttsStatus.ultimoErro = "MP3 falhou: " + (e?.message || e);
         notificarTTS();
         derror("[TTS] ❌ MP3 também falhou: " + (e?.message || e));
-        // Não relança: o painel da TV deve continuar na tela mesmo sem som
-        return false;
+        return isNotAllowedError(e) ? "blocked" : false;
       }
     };
 
-    // Smart TV: sempre MP3 (sem TTS nativo confiável)
     const ehTV = ehSmartTV() || isSamsungTV();
     if (ehTV) {
       forcarMP3();
-      await usarMP3("Smart TV — narração por áudio MP3");
-      return;
+      return usarMP3("Smart TV — narração por áudio MP3");
     }
 
-    // Se já sabe que MP3 funciona, usa direto
     if (estrategiaCacheada === "mp3") {
-      await usarMP3("usando estratégia em cache");
-      return;
+      return usarMP3("usando estratégia em cache");
     }
 
-    // Se já sabe que nativo funciona, tenta nativo primeiro
     if (estrategiaCacheada === "nativo") {
       try {
         dlog(`[TTS] Tentando nativo (em cache)`);
         const ok = await falarViaNativo(texto);
-        if (!ok) {
-          await usarMP3("nativo retornou sem falar");
-        } else {
-          ttsStatus.anunciosFeitos++;
-          ttsStatus.ultimoAnuncioTs = new Date();
-          ttsStatus.ultimoErro = null;
-          notificarTTS();
-          dlog("[TTS] ✅ Anunciou via nativo (cache)");
-        }
-        return;
+        if (!ok) return usarMP3("nativo retornou sem falar");
+        ttsStatus.anunciosFeitos++;
+        ttsStatus.ultimoAnuncioTs = new Date();
+        ttsStatus.ultimoErro = null;
+        notificarTTS();
+        dlog("[TTS] ✅ Anunciou via nativo (cache)");
+        return true;
       } catch (e) {
-        await usarMP3("nativo lançou erro: " + (e?.message || e));
-        return;
+        return usarMP3("nativo lançou erro: " + (e?.message || e));
       }
     }
 
-    // Primeira tentativa no PC/navegador
     const temSpeech = !!window.speechSynthesis;
     const voices = temSpeech ? window.speechSynthesis.getVoices() : [];
     const temVozes = voices && voices.length > 0;
@@ -363,8 +407,7 @@ const falarTextoUniversal = (() => {
     dlog(`[TTS] Detecção: SmartTV=${ehTV}, SamsungTV=${isSamsungTV()}, speechSynthesis=${temSpeech}, vozes=${voices?.length || 0}`);
 
     if (!temSpeech || !temVozes) {
-      await usarMP3("sem speechSynthesis/vozes — usando MP3");
-      return;
+      return usarMP3("sem speechSynthesis/vozes — usando MP3");
     }
 
     try {
@@ -378,17 +421,18 @@ const falarTextoUniversal = (() => {
         ttsStatus.ultimoErro = null;
         notificarTTS();
         dlog("[TTS] ✅ Estratégia decidida: NATIVO");
-      } else {
-        dlog("[TTS] Nativo retornou sem falar, caindo para MP3");
-        await usarMP3("nativo retornou false");
+        return true;
       }
+      dlog("[TTS] Nativo retornou sem falar, caindo para MP3");
+      return usarMP3("nativo retornou false");
     } catch (e) {
       dwarn("[TTS] Nativo falhou, caindo para MP3: " + (e?.message || e));
-      await usarMP3("nativo falhou: " + (e?.message || e));
+      return usarMP3("nativo falhou: " + (e?.message || e));
     }
   };
 
   api.forcarMP3 = forcarMP3;
+  api.parar = pararAudioAtual;
   return api;
 })();
 
@@ -600,6 +644,8 @@ function PainelTVPage({
   });
   const pendingTimeoutsRef = useRef(new Set());
   const somAtivoRef = useRef(somAtivo);
+  const unlockingRef = useRef(false);
+  const anuncioChaveRef = useRef(null);
   const chamandoRawRef = useRef(null);
   const chamadoExibidoIdRef = useRef(null);
   const montarChamadoRef = useRef(null);
@@ -619,7 +665,7 @@ function PainelTVPage({
   const cancelarAnunciosPendentes = () => {
     pendingTimeoutsRef.current.forEach(clearTimeout);
     pendingTimeoutsRef.current.clear();
-    try { window.speechSynthesis?.cancel(); } catch (_) {}
+    pararAudioAtual();
   };
 
   useEffect(() => {
@@ -647,43 +693,13 @@ function PainelTVPage({
   }, []);
 
   const unlockAudio = async () => {
+    // Evita múltiplos cliques/OK do controle dispararem várias narracoes
+    if (unlockingRef.current) return;
+    unlockingRef.current = true;
     try {
       dlog("[Audio] Tentando desbloquear áudio...");
-      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-      if (AudioContextCtor) {
-        const ctx = new AudioContextCtor();
-        await ctx.resume();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.gain.value = 0.001;
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(0);
-        setTimeout(() => { try { osc.stop(); } catch (_) {} }, 100);
-        dlog("[Audio] AudioContext desbloqueado");
-      }
-      if (window.speechSynthesis) {
-        const carregarVozes = () => {
-          const voces = window.speechSynthesis.getVoices() || [];
-          dlog(`[Audio] SpeechSynthesis pronto (${voces.length} vozes)`);
-          const voz = escolherVoz();
-          if (voz) {
-            ttsStatus.vozSelecionada = `${voz.name} (${voz.lang})`;
-            notificarTTS();
-          }
-        };
-        carregarVozes();
-        if (typeof window.speechSynthesis.onvoiceschanged !== "undefined") {
-          window.speechSynthesis.onvoiceschanged = carregarVozes;
-        }
-        try {
-          const warm = new SpeechSynthesisUtterance(" ");
-          warm.volume = 0;
-          warm.rate = 2;
-          window.speechSynthesis.speak(warm);
-          window.speechSynthesis.cancel();
-        } catch (_) {}
-      }
+      await garantirAudioContext();
+
       try {
         const silentAudio = new Audio(
           "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA"
@@ -691,9 +707,13 @@ function PainelTVPage({
         silentAudio.volume = 0.01;
         await silentAudio.play();
         dlog("[Audio] Silent audio tocado");
-      } catch (_) {}
+      } catch (e) {
+        dwarn("[Audio] Silent play: " + (e?.message || e));
+      }
 
-      // Na TV, força a estratégia MP3 (a mesma que resolveu o "não chamava")
+      // Beep curto como prova de áudio (sem frase longa que gera eco/falha)
+      try { playBeep(); } catch (_) {}
+
       if (ehSmartTV() || isSamsungTV()) {
         falarTextoUniversal.forcarMP3?.();
       }
@@ -702,19 +722,16 @@ function PainelTVPage({
         window.localStorage.setItem(SOM_ATIVO_KEY, "1");
       } catch (_) {}
       setSomAtivo(true);
+      somAtivoRef.current = true;
       setAutoplayBlocked(false);
       dlog("[Audio] ✅ Som desbloqueado com sucesso");
-
-      // Confirmação audível na TV — prova que a narração está liberada
-      if (ehSmartTV() || isSamsungTV()) {
-        try {
-          playBeep();
-          setTimeout(() => {
-            falarTextoUniversal("Som do painel ativado. As próximas chamadas serão anunciadas.").catch(() => {});
-          }, 150);
-        } catch (_) {}
-      }    } catch (e) {
+    } catch (e) {
       derror("[Audio] Falha ao desbloquear: " + (e?.message || e));
+      if (isNotAllowedError(e)) setAutoplayBlocked(true);
+    } finally {
+      setTimeout(() => {
+        unlockingRef.current = false;
+      }, 1500);
     }
   };
 
@@ -916,35 +933,37 @@ function PainelTVPage({
       }
 
       const nomePrincipal = getNomeExibicao(novoChamado);
+      const chave = `${novoChamado.id}:${getMillis(novoChamado.hora_chamada) || 0}`;
+      if (anuncioChaveRef.current === chave) {
+        dlog("[Chamada] Anúncio já disparado para esta chamada — ignorando duplicata");
+        return;
+      }
+      anuncioChaveRef.current = chave;
+
       dlog(`[Chamada] ${nomePrincipal} → ${localAtendimento}`);
 
-      const tocar = async () => {
+      // Cancela anúncio anterior (timeout + MP3) antes de começar o novo
+      cancelarAnunciosPendentes();
+
+      const tid = setTimeout(async () => {
+        pendingTimeoutsRef.current.delete(tid);
+        setAnunciando(true);
         try {
-          // Beep curto e narração quase imediata (antes: 400ms beep + 300ms espera)
+          await garantirAudioContext();
           try { playBeep(); } catch (_) {}
-          const tid = setTimeout(async () => {
-            pendingTimeoutsRef.current.delete(tid);
-            setAnunciando(true);
-            try {
-              await anunciarChamada(novoChamado, nomePrincipal);
-              if (ttsStatus.ultimoErro) setAutoplayBlocked(true);
-            } catch (e) {
-              dwarn("[Audio] Falha no anúncio: " + (e?.message || e));
-              setAutoplayBlocked(true);
-            } finally {
-              setAnunciando(false);
-            }
-          }, 120);
-          pendingTimeoutsRef.current.add(tid);
+          const resultado = await anunciarChamada(novoChamado, nomePrincipal);
+          // Só pede "reativar som" se o navegador bloqueou autoplay de verdade
+          if (resultado === "blocked") {
+            setAutoplayBlocked(true);
+          }
         } catch (e) {
-          dwarn("[Audio] Autoplay bloqueado: " + (e?.message || e));
-          setAutoplayBlocked(true);
+          dwarn("[Audio] Falha no anúncio: " + (e?.message || e));
+          if (isNotAllowedError(e)) setAutoplayBlocked(true);
+        } finally {
+          setAnunciando(false);
         }
-      };
-      tocar().catch((e) => {
-        dwarn("[Audio] Erro ao disparar anúncio: " + (e?.message || e));
-        setAutoplayBlocked(true);
-      });
+      }, 80);
+      pendingTimeoutsRef.current.add(tid);
     };
 
     const processarChamadaAtiva = (snapshot) => {
@@ -983,7 +1002,8 @@ function PainelTVPage({
         !isNovoId &&
         novoTs &&
         lastChamadoRef.current.ts &&
-        novoTs !== lastChamadoRef.current.ts;
+        // Rechamada real (botão rechamar), não só resolução do serverTimestamp
+        novoTs - lastChamadoRef.current.ts > 8000;
 
       const jaAnunciadoHoje =
         lastChamadoRef.current.id === novoChamado.id &&
@@ -996,7 +1016,6 @@ function PainelTVPage({
           ts: novoTs ?? lastChamadoRef.current.ts,
         };
         persistirUltimoAnuncio(lastChamadoRef.current.id, lastChamadoRef.current.ts);
-        cancelarAnunciosPendentes();
         dispararAnuncio(novoChamado, novoChamado.atendente_guiche);
       } else if (!lastChamadoRef.current.ts && novoTs) {
         lastChamadoRef.current.ts = novoTs;
@@ -1156,8 +1175,18 @@ function PainelTVPage({
       {!somAtivo && ehSmartTV() && (
         <div
           className="fixed inset-0 z-[99998] bg-black/90 flex items-center justify-center cursor-pointer"
-          onClick={unlockAudio}
-          onKeyDown={unlockAudio}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            unlockAudio();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " " || e.key === "OK") {
+              e.preventDefault();
+              e.stopPropagation();
+              unlockAudio();
+            }
+          }}
           role="button"
           tabIndex={0}
         >
@@ -1165,7 +1194,7 @@ function PainelTVPage({
             <div className="text-[clamp(4rem,12vw,8rem)] mb-6">🔊</div>
             <h2 className="text-[clamp(1.8rem,5vw,3.5rem)] font-black mb-4">Ativar Som do Painel</h2>
             <p className="text-[clamp(1.1rem,3vw,1.8rem)] opacity-90 mb-8 leading-relaxed">
-              A televisão não possui narração nativa. Pressione <strong>OK</strong> no controle remoto ou toque na tela para liberar o áudio das chamadas.
+              Pressione <strong>OK</strong> no controle remoto ou toque na tela <strong>uma vez</strong> para liberar a narração das chamadas.
             </p>
             <div className="inline-block bg-red-600 hover:bg-red-500 px-10 py-5 rounded-2xl font-bold text-[clamp(1.2rem,3vw,2rem)] uppercase tracking-wide animate-pulse shadow-2xl">
               Ativar Som Agora
